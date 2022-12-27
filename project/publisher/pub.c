@@ -12,7 +12,18 @@
 
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = box_name
 int main(int argc, char **argv) {
-    (void)argc;
+    
+    if (!strcmp(argv[1], "--help")){
+        printf("usage: ./pub <register_pipe> <pipe_name> <box_name>\n");
+        return 0;
+    }
+
+    if (argc != 4) {
+        fprintf(stderr, "pub: Invalid arguments.\nTry './pub --help' for"
+                        " more information.\n");
+        exit(EXIT_FAILURE);
+    }
+
     int register_pipe_fd, pub_pipe_fd;
 
     // Open the register pipe for writing
@@ -67,9 +78,10 @@ int main(int argc, char **argv) {
     while (c != EOF) {
         c = (char)getchar();
 
-        if (i < 5) {
+        if (i < MSG_MAX_SIZE - 1) {
             // the msg hasn't exceeded the max size (1024)
             if (c == '\n' || (c == EOF && i > 0)) {
+                // we've reached the end of the msg, let's send it
                 buffer[i] = '\0';
                 i = 0;
                 // TODO:send msg to broker
@@ -81,7 +93,7 @@ int main(int argc, char **argv) {
             } else {
                 buffer[i++] = c;
             }
-        } else if (i == 5) {
+        } else if (i == MSG_MAX_SIZE - 1) {
             // the msg size is >= 1024, so we need to truncate
             buffer[i++] = '\0';
             // TODO:send msg to broker
@@ -101,6 +113,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "[ERR] Close failed: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
+
+    // TODO: unlink named pipe
 
     return 0;
 }
