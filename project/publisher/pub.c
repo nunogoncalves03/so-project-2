@@ -9,11 +9,15 @@
 
 #define PIPENAME_SIZE 256
 #define MSG_MAX_SIZE 1024
+#define BOXNAME_SIZE 32
+#define OPCODE_SIZE 1
+#define REGISTRATION_SIZE OPCODE_SIZE + PIPENAME_SIZE + BOXNAME_SIZE
+#define PUB_MSG_SIZE OPCODE_SIZE + MSG_MAX_SIZE
 
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = box_name
 int main(int argc, char **argv) {
-    
-    if (!strcmp(argv[1], "--help")){
+
+    if (!strcmp(argv[1], "--help")) {
         printf("usage: ./pub <register_pipe> <pipe_name> <box_name>\n");
         return 0;
     }
@@ -51,12 +55,22 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    // Fill the remaining space of the path with the null character
-    char pipe_path[PIPENAME_SIZE] = {0};
-    strcpy(pipe_path, argv[2]);
+    /* Protocol */
 
-    // Send the path to pub_pipe to mbroker
-    if (write(register_pipe_fd, pipe_path, PIPENAME_SIZE) < 0) {
+    char registration[REGISTRATION_SIZE] = {0};
+
+    // OP_CODE
+    registration[0] = 1;
+
+    // Pipe path
+    strcpy(registration + OPCODE_SIZE, argv[2]);
+
+    // Box name
+    strcpy(registration + OPCODE_SIZE + PIPENAME_SIZE, argv[3]);
+
+    // Send registration to mbroker
+    if (write(register_pipe_fd, registration, REGISTRATION_SIZE) <
+        REGISTRATION_SIZE) {
         fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
@@ -72,20 +86,20 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    char buffer[MSG_MAX_SIZE];
+    char buffer[PUB_MSG_SIZE];
+    buffer[0] = 9;
     char c = '\0';
-    int i = 0;
+    int i = 1;
     while (c != EOF) {
         c = (char)getchar();
 
-        if (i < MSG_MAX_SIZE - 1) {
+        if (i < MSG_MAX_SIZE) {
             // the msg hasn't exceeded the max size (1024)
-            if (c == '\n' || (c == EOF && i > 0)) {
+            if (c == '\n' || (c == EOF && i > 1)) {
                 // we've reached the end of the msg, let's send it
                 buffer[i] = '\0';
-                i = 0;
-                // TODO:send msg to broker
-                if (write(pub_pipe_fd, buffer, strlen(buffer) + 1) < 0) {
+                i = 1;
+                if (write(pub_pipe_fd, buffer, PUB_MSG_SIZE) < PUB_MSG_SIZE) {
                     fprintf(stderr, "[ERR] Write failed: %s\n",
                             strerror(errno));
                     exit(EXIT_FAILURE);
@@ -93,19 +107,29 @@ int main(int argc, char **argv) {
             } else {
                 buffer[i++] = c;
             }
-        } else if (i == MSG_MAX_SIZE - 1) {
-            // the msg size is >= 1024, so we need to truncate
+        } else if (i == MSG_MAX_SIZE) {
+            // the msg size is >= 1023, so we need to truncate
             buffer[i++] = '\0';
-            // TODO:send msg to broker
-            if (write(pub_pipe_fd, buffer, strlen(buffer) + 1) < 0) {
+            if (write(pub_pipe_fd, buffer, PUB_MSG_SIZE) < PUB_MSG_SIZE) {
                 fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
                 exit(EXIT_FAILURE);
             }
+
+            // if the msg is exactly 1023 char long, we don't want to enter
+            // the "else" condition and consume the next characters
+            if (c == '\n' || c == EOF)
+                i = 1;
+
         } else {
-            // consume the leftover characters
-            while ((c = (char)getchar()) != '\n' && c != EOF)
-                ;
-            i = 0;
+            // if the msg is exactly 1024 char long, we don't want to consume
+            // the '\n' before checking the condition
+            if (c != '\n' && c != EOF) {
+                // consume the leftover characters
+                while ((c = (char)getchar()) != '\n' && c != EOF)
+                    ;
+            }
+            
+            i = 1;
         }
     }
 

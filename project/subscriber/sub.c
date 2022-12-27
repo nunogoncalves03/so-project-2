@@ -9,6 +9,10 @@
 
 #define PIPENAME_SIZE 256
 #define MSG_MAX_SIZE 1024
+#define BOXNAME_SIZE 32
+#define OPCODE_SIZE 1
+#define REGISTRATION_SIZE OPCODE_SIZE + PIPENAME_SIZE + BOXNAME_SIZE
+#define PUB_MSG_SIZE OPCODE_SIZE + MSG_MAX_SIZE
 
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = box_name
 int main(int argc, char **argv) {
@@ -52,12 +56,22 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    // Fill the remaining space of the path with the null character
-    char pipe_path[PIPENAME_SIZE] = {0};
-    strcpy(pipe_path, argv[2]);
+    /* Protocol */
+    
+    char registration[REGISTRATION_SIZE] = {0};
 
-    // Send the path to sub_pipe to mbroker
-    if (write(register_pipe_fd, pipe_path, PIPENAME_SIZE) < 0) {
+    // OP_CODE
+    registration[0] = 2;
+
+    // Pipe path
+    strcpy(registration + OPCODE_SIZE, argv[2]);
+
+    // Box name
+    strcpy(registration + OPCODE_SIZE + PIPENAME_SIZE, argv[3]);
+
+    // Send registration to mbroker
+    if (write(register_pipe_fd, registration, REGISTRATION_SIZE) < 
+        REGISTRATION_SIZE) {
         fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
@@ -73,12 +87,12 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    char buffer[MSG_MAX_SIZE];
+    char buffer[PUB_MSG_SIZE];
     ssize_t ret;
     int msg_counter = 0;
     // Read incoming messages until mbroker closes the pipe
     while (1) {
-        ret = read(sub_pipe_fd, buffer, PIPENAME_SIZE);
+        ret = read(sub_pipe_fd, buffer, PUB_MSG_SIZE);
 
         if (ret == 0) {
             // ret == 0 indicates EOF
@@ -91,17 +105,14 @@ int main(int argc, char **argv) {
             exit(EXIT_FAILURE);
         }
 
-        size_t len = strlen(buffer);
-        char *ptr_buffer = buffer;
-        size_t _ret = (size_t)ret;
-        // Separar as mensagens
-        while (_ret > 0) {
-            msg_counter++;
-            fprintf(stdout, "%s\n", ptr_buffer);
-            _ret -= len + 1;
-            ptr_buffer += len + 1;
-            len = strlen(ptr_buffer);
+        // Verify code
+        if (buffer[0] != 10) {
+            fprintf(stderr, "Internal error: Invalid OP_CODE!\n");
+            exit(EXIT_FAILURE);
         }
+
+        msg_counter++;
+        fprintf(stdout, "%s\n", buffer + OPCODE_SIZE);
     }
     
     // TODO: devemos fechar?
