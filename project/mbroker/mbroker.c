@@ -11,11 +11,13 @@
 
 #define MSG_MAX_SIZE 1024
 #define PIPENAME_SIZE 256
-#define BOX_NAME "/box"
 #define BOXNAME_SIZE 32
 #define OPCODE_SIZE 1
 #define REGISTRATION_SIZE OPCODE_SIZE + PIPENAME_SIZE + BOXNAME_SIZE
 #define PUB_MSG_SIZE OPCODE_SIZE + MSG_MAX_SIZE
+#define RETURN_CODE_SIZE sizeof(int32_t)
+#define ERROR_MSG_SIZE 1024
+#define BOX_RESPONSE OPCODE_SIZE + RETURN_CODE_SIZE + ERROR_MSG_SIZE
 
 void pub_fn(char *pub_pipe_path, char *box_name) {
     int pub_pipe_fd, box_fd;
@@ -102,7 +104,6 @@ void sub_fn(char *sub_pipe_path, char *box_name) {
         exit(EXIT_FAILURE);
     }
 
-
     size_t len = strlen(buffer);
     char *ptr_buffer = buffer;
     size_t _ret = (size_t)ret;
@@ -119,13 +120,130 @@ void sub_fn(char *sub_pipe_path, char *box_name) {
         len = strlen(ptr_buffer);
     }
 
-
     if (tfs_close(box_fd) == -1) {
         fprintf(stderr, "[ERR] tfs_close failed.\n");
         exit(EXIT_FAILURE);
     }
 
     if (close(sub_pipe_fd) == -1) {
+        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+}
+
+void box_creation(char *man_pipe_path, char *box_name) {
+    int man_pipe_fd, box_fd;
+
+    // Open the man_pipe for writing messages
+    if ((man_pipe_fd = open(man_pipe_path, O_WRONLY)) == -1) {
+        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    /* Protocol */
+
+    // OP_CODE
+    char op_code = 4;
+
+    // return_code
+    int32_t return_code = 0;
+
+    // error message
+    char error_msg[ERROR_MSG_SIZE] = {0};
+
+    // TODO: tfs_lookup?
+    // Create the box
+    if ((box_fd = tfs_open(box_name, TFS_O_CREAT)) == -1) {
+        return_code = -1;
+        strcpy(error_msg, "Couldn't create box.");
+    }
+    
+    if (box_fd != -1) {
+        if (tfs_close(box_fd) == -1) {
+            // Shouldn't happen
+            fprintf(stderr, "Internal error: Box close failed!\n");
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    // Send the response
+
+    // OP_CODE
+    if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
+        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // return_code
+    if (write(man_pipe_fd, &return_code, RETURN_CODE_SIZE) < RETURN_CODE_SIZE) {
+        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // error message
+    if (return_code == -1) {
+        if (write(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE) {
+            fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if (close(man_pipe_fd) == -1) {
+        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+}
+
+void box_removal(char *man_pipe_path, char *box_name) {
+    int man_pipe_fd;
+
+    // Open the man_pipe for writing messages
+    if ((man_pipe_fd = open(man_pipe_path, O_WRONLY)) == -1) {
+        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    /* Protocol */
+
+    // OP_CODE
+    char op_code = 6;
+
+    // return_code
+    int32_t return_code = 0;
+
+    // error message
+    char error_msg[ERROR_MSG_SIZE] = {0};
+
+    // TODO: tfs_lookup?
+    // Remove the box
+    if (tfs_unlink(box_name) == -1) {
+        return_code = -1;
+        strcpy(error_msg, "Couldn't remove box.");
+    }
+
+    // Send the response
+
+    // OP_CODE
+    if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
+        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // return_code
+    if (write(man_pipe_fd, &return_code, RETURN_CODE_SIZE) < RETURN_CODE_SIZE) {
+        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    // error message
+    if (return_code == -1) {
+        if (write(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE) {
+            fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if (close(man_pipe_fd) == -1) {
         fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
@@ -148,18 +266,6 @@ int main(int argc, char **argv) {
     // Init the file system
     if (tfs_init(NULL) == -1) {
         fprintf(stderr, "[ERR] tfs_init failed.\n");
-        exit(EXIT_FAILURE);
-    }
-
-    int box_fd;
-    // Create the box
-    if ((box_fd = tfs_open(BOX_NAME, TFS_O_CREAT)) == -1) {
-        fprintf(stderr, "[ERR] tfs_open failed.\n");
-        exit(EXIT_FAILURE);
-    }
-
-    if (tfs_close(box_fd) == -1) {
-        fprintf(stderr, "[ERR] tfs_close failed.\n");
         exit(EXIT_FAILURE);
     }
 
@@ -195,6 +301,7 @@ int main(int argc, char **argv) {
             // ret == 0 indicates EOF
             fprintf(stderr, "[INFO]: pipe closed\n");
 
+            // TODO: reopen?
             // Close the register pipe
             if (close(register_pipe_fd) == -1) {
                 fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
@@ -215,30 +322,41 @@ int main(int argc, char **argv) {
         }
 
         switch (opcode) {
-        case 1:  // publisher registration
-        case 2:  // subscriber registration
-            {char pipe_path[PIPENAME_SIZE];
+        case 1: // publisher registration
+        case 2: // subscriber registration
+        /* Manager requests */
+        case 3: // Box creation
+        case 5: // Box removal
+        {
+            char pipe_path[PIPENAME_SIZE];
             // Read the client pipe path, from where we will interact with him
-            if (read(register_pipe_fd, pipe_path, PIPENAME_SIZE) < 
-            PIPENAME_SIZE) {
+            if (read(register_pipe_fd, pipe_path, PIPENAME_SIZE) <
+                PIPENAME_SIZE) {
                 fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
                 exit(EXIT_FAILURE);
             }
 
             char box_name[BOXNAME_SIZE];
             // Read the box name
-            if (read(register_pipe_fd, box_name, BOXNAME_SIZE) < 
-            BOXNAME_SIZE) {
+            if (read(register_pipe_fd, box_name, BOXNAME_SIZE) < BOXNAME_SIZE) {
                 fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
                 exit(EXIT_FAILURE);
             }
 
             if (opcode == 1) // publisher
                 pub_fn(pipe_path, box_name);
-            else             // subscriber
+            else if (opcode == 2) // subscriber
                 sub_fn(pipe_path, box_name);
+            else if (opcode == 3) // box creation
+                box_creation(pipe_path, box_name);
+            else if (opcode == 5) // box removal
+                box_removal(pipe_path, box_name);
 
-            break;}
+            break;
+        }
+
+        case 7: // Box listing
+            break;
         default:
             fprintf(stderr, "Internal error: Invalid OP_CODE!\n");
             exit(EXIT_FAILURE);
