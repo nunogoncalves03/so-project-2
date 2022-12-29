@@ -17,6 +17,16 @@
 #define RETURN_CODE_SIZE sizeof(int32_t)
 #define ERROR_MSG_SIZE 1024
 #define BOX_RESPONSE OPCODE_SIZE + RETURN_CODE_SIZE + ERROR_MSG_SIZE
+#define LAST_SIZE sizeof(uint8_t)
+#define INT64_SIZE sizeof(uint64_t)
+#define MAX_N_BOXES 23 // TODO: Can we even do this?
+
+typedef struct {
+    char box_name[BOXNAME_SIZE];
+    uint64_t box_size;
+    uint64_t n_publishers;
+    uint64_t n_subscribers;
+} box_t;
 
 static void print_usage() {
     fprintf(stderr,
@@ -26,11 +36,15 @@ static void print_usage() {
             "   ./manager <register_pipe> <pipe_name> list\n");
 }
 
+int box_comparator_fn(const void *a, const void *b) {
+    return strcmp(((box_t *)(a))->box_name, ((box_t *)(b))->box_name);
+}
+
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = *, argv[4] = box_name
 int main(int argc, char **argv) {
     int valid_args = 1;
 
-    if (!strcmp(argv[1], "--help")) {
+    if (argc == 2 && !strcmp(argv[1], "--help")) {
         print_usage();
         return 0;
     }
@@ -122,9 +136,16 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    ssize_t ret;
     char opcode;
     // Read the response
-    if (read(man_pipe_fd, &opcode, OPCODE_SIZE) < OPCODE_SIZE) {
+    ret = read(man_pipe_fd, &opcode, OPCODE_SIZE);
+
+    if (ret == 0) {
+        // ret == 0 indicates EOF
+        return 0;
+    } else if (ret == -1) {
+        // ret == -1 indicates error
         fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
     }
@@ -154,10 +175,50 @@ int main(int argc, char **argv) {
         } else {
             printf("%d\n", return_code);
         }
+
         break;
     }
-    case 8: // response to box listing
+    case 8: { // response to box listing
+        box_t boxes[MAX_N_BOXES];
+        uint8_t last = 0;
+        size_t i = 0;
+
+        while (!last) {
+
+            if (i != 0) {
+                // Read the OP_CODE
+                if (read(man_pipe_fd, &opcode, OPCODE_SIZE) < OPCODE_SIZE) {
+                    fprintf(stderr, "[ERR]: read failed: %s\n",
+                            strerror(errno));
+                    exit(EXIT_FAILURE);
+                }
+            }
+
+            // Read the "last" byte
+            if (read(man_pipe_fd, &last, LAST_SIZE) < LAST_SIZE) {
+                fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+
+            // Read a box_t
+            if (read(man_pipe_fd, &boxes[i++], sizeof(box_t)) < sizeof(box_t)) {
+                fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        // Sort the boxes in lexicographical order
+        qsort(boxes, i, sizeof(box_t), box_comparator_fn);
+
+        // Print the boxes
+        for (size_t j = 0; j < i; j++) {
+            fprintf(stdout, "%s %zu %zu %zu\n", boxes[j].box_name,
+                    boxes[j].box_size, boxes[j].n_publishers,
+                    boxes[j].n_subscribers);
+        }
+
         break;
+    }
     default:
         fprintf(stderr, "Internal error: Invalid OP_CODE!\n");
         exit(EXIT_FAILURE);

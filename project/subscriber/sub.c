@@ -18,7 +18,7 @@
 int main(int argc, char **argv) {
 
     // TODO: Processar CTRL + C
-    if (!strcmp(argv[1], "--help")) {
+    if (argc == 2 && !strcmp(argv[1], "--help")) {
         printf("usage: ./sub <register_pipe> <pipe_name> <box_name>\n");
         return 0;
     }
@@ -57,7 +57,7 @@ int main(int argc, char **argv) {
     }
 
     /* Protocol */
-    
+
     char registration[REGISTRATION_SIZE] = {0};
 
     // OP_CODE
@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
     strcpy(registration + OPCODE_SIZE + PIPENAME_SIZE, argv[3]);
 
     // Send registration to mbroker
-    if (write(register_pipe_fd, registration, REGISTRATION_SIZE) < 
+    if (write(register_pipe_fd, registration, REGISTRATION_SIZE) <
         REGISTRATION_SIZE) {
         fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
         exit(EXIT_FAILURE);
@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
         msg_counter++;
         fprintf(stdout, "%s\n", buffer + OPCODE_SIZE);
     }
-    
+
     // TODO: devemos fechar?
     if (close(sub_pipe_fd) == -1) {
         fprintf(stderr, "[ERR] Close failed: %s\n", strerror(errno));
