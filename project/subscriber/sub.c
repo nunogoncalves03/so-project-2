@@ -1,4 +1,6 @@
+#include "common.h"
 #include "logging.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -6,13 +8,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-#define PIPENAME_SIZE 256
-#define MSG_MAX_SIZE 1024
-#define BOXNAME_SIZE 32
-#define OPCODE_SIZE 1
-#define REGISTRATION_SIZE OPCODE_SIZE + PIPENAME_SIZE + BOXNAME_SIZE
-#define PUB_MSG_SIZE OPCODE_SIZE + MSG_MAX_SIZE
 
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = box_name
 int main(int argc, char **argv) {
@@ -61,7 +56,7 @@ int main(int argc, char **argv) {
     char registration[REGISTRATION_SIZE] = {0};
 
     // OP_CODE
-    registration[0] = 2;
+    registration[0] = OPCODE_SUB_REG;
 
     // Pipe path
     strcpy(registration + OPCODE_SIZE, argv[2]);
@@ -106,7 +101,7 @@ int main(int argc, char **argv) {
         }
 
         // Verify code
-        if (buffer[0] != 10) {
+        if (buffer[0] != OPCODE_SUB_MSG) {
             fprintf(stderr, "Internal error: Invalid OP_CODE!\n");
             exit(EXIT_FAILURE);
         }

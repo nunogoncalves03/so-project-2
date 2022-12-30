@@ -1,4 +1,7 @@
+#include "manager.h"
+#include "common.h"
 #include "logging.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -8,36 +11,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#define PIPENAME_SIZE 256
-#define MSG_MAX_SIZE 1024
-#define BOXNAME_SIZE 32
-#define OPCODE_SIZE 1
-#define REGISTRATION_SIZE OPCODE_SIZE + PIPENAME_SIZE + BOXNAME_SIZE
-#define LIST_REQUEST_SIZE OPCODE_SIZE + PIPENAME_SIZE
-#define RETURN_CODE_SIZE sizeof(int32_t)
-#define ERROR_MSG_SIZE 1024
-#define BOX_RESPONSE OPCODE_SIZE + RETURN_CODE_SIZE + ERROR_MSG_SIZE
-#define LAST_SIZE sizeof(uint8_t)
-#define INT64_SIZE sizeof(uint64_t)
-#define MAX_N_BOXES 23 // TODO: Can we even do this?
-
-typedef struct {
-    char box_name[BOXNAME_SIZE];
-    uint64_t box_size;
-    uint64_t n_publishers;
-    uint64_t n_subscribers;
-} box_t;
-
 static void print_usage() {
     fprintf(stderr,
             "usage:\n"
             "   ./manager <register_pipe> <pipe_name> create <box_name>\n"
             "   ./manager <register_pipe> <pipe_name> remove <box_name>\n"
             "   ./manager <register_pipe> <pipe_name> list\n");
-}
-
-int box_comparator_fn(const void *a, const void *b) {
-    return strcmp(((box_t *)(a))->box_name, ((box_t *)(b))->box_name);
 }
 
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = *, argv[4] = box_name
@@ -97,11 +76,11 @@ int main(int argc, char **argv) {
 
     // OP_CODE
     if (argc == 4) // List
-        registration[0] = 7;
+        registration[0] = OPCODE_BOX_LIST;
     else if (!strcmp(argv[3], "create")) // Create
-        registration[0] = 3;
+        registration[0] = OPCODE_BOX_CREAT;
     else if (!strcmp(argv[3], "remove")) // Remove
-        registration[0] = 5;
+        registration[0] = OPCODE_BOX_REMOVE;
 
     // Pipe path
     strcpy(registration + OPCODE_SIZE, argv[2]);
@@ -151,8 +130,8 @@ int main(int argc, char **argv) {
     }
 
     switch (opcode) {
-    case 4:   // response to creation
-    case 6: { // response to removal
+    case OPCODE_RES_BOX_CREAT:    // response to creation
+    case OPCODE_RES_BOX_REMOVE: { // response to removal
         int32_t return_code;
 
         // Read the return code
@@ -178,7 +157,7 @@ int main(int argc, char **argv) {
 
         break;
     }
-    case 8: { // response to box listing
+    case OPCODE_RES_BOX_LIST: { // response to box listing
         box_t boxes[MAX_N_BOXES];
         uint8_t last = 0;
         size_t i = 0;
@@ -190,6 +169,12 @@ int main(int argc, char **argv) {
                 if (read(man_pipe_fd, &opcode, OPCODE_SIZE) < OPCODE_SIZE) {
                     fprintf(stderr, "[ERR]: read failed: %s\n",
                             strerror(errno));
+                    exit(EXIT_FAILURE);
+                }
+
+                // Verify code
+                if (opcode != OPCODE_RES_BOX_LIST) {
+                    fprintf(stderr, "Internal error: Invalid OP_CODE!\n");
                     exit(EXIT_FAILURE);
                 }
             }
@@ -234,4 +219,8 @@ int main(int argc, char **argv) {
     // TODO: unlink named pipe
 
     return 0;
+}
+
+int box_comparator_fn(const void *a, const void *b) {
+    return strcmp(((box_t *)(a))->box_name, ((box_t *)(b))->box_name);
 }
