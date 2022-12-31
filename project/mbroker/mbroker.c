@@ -174,7 +174,13 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
     // Check if box exists
     if (i_box == -1) {
         fprintf(stderr, "[ERR] Box %s doesn't exist.\n", box_name);
-        exit(EXIT_FAILURE);
+
+        // Close the pub pipe
+        if (close(pub_pipe_fd) == -1) {
+            fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        return;
     }
 
     box_t *box = &boxes[i_box];
@@ -183,7 +189,13 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
     // Check if there's no pub already in the given box
     if (box->n_publishers == 1) {
         fprintf(stderr, "[ERR] There's already a pub in box %s.\n", box_name);
-        exit(EXIT_FAILURE);
+
+        // Close the pub pipe
+        if (close(pub_pipe_fd) == -1) {
+            fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        return;
     }
 
     box->n_publishers = 1;
@@ -203,7 +215,7 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
         ret = read(pub_pipe_fd, buffer, PUB_MSG_SIZE);
 
         if (ret == 0) {
-            // ret == 0 indicates EOF
+            // ret == 0 indicates EOF, pub ended session
             break;
         } else if (ret == -1) {
             // ret == -1 indicates error
@@ -220,9 +232,15 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
         // Copy only the msg itself
         strcpy(msg, buffer + OPCODE_SIZE);
 
-        if (tfs_write(box_fd, msg, strlen(msg) + 1) < strlen(msg) + 1) {
-            fprintf(stderr, "[ERR]: tfs_write failed\n");
-            exit(EXIT_FAILURE);
+        if ((ret = tfs_write(box_fd, msg, strlen(msg) + 1)) < strlen(msg) + 1) {
+            if (ret == -1) { // error
+                fprintf(stderr, "[ERR]: tfs_write failed\n");
+                exit(EXIT_FAILURE);
+            } else { // Couldn't write whole message
+                // TODO: alertar subs que ja n vai ser escrito mais nada
+                fprintf(stderr, "[ERR]: Box %s is full\n", box_name);
+                break;
+            }
         }
     }
 
@@ -291,15 +309,22 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
     size_t _ret = (size_t)ret;
     // Separate messages
     while (_ret > 0) {
-        _ret -= len + 1;
-        strcpy(response + OPCODE_SIZE, ptr_buffer);
+        strncpy(response + OPCODE_SIZE, ptr_buffer,
+                (len == _ret ? len : len + 1));
+
+        _ret -= (len == _ret ? len : len + 1);
         // Send each message to sub
         if (write(sub_pipe_fd, response, PUB_MSG_SIZE) < PUB_MSG_SIZE) {
+            // TODO: ignore SIGPIPE and end session
             fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
             exit(EXIT_FAILURE);
         }
         ptr_buffer += len + 1;
-        len = strlen(ptr_buffer);
+        if (_ret > 0) {
+            len = strnlen(ptr_buffer, _ret);
+            if (len == _ret)
+                response[OPCODE_SIZE + len] = '\0';
+        }
     }
 
     if (tfs_close(box_fd) == -1) {

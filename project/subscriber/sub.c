@@ -3,16 +3,36 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#define STDOUT_FD 1
+#define STDERR_FD 2
+#define WRITE_FAILED "[ERR] write failed.\n"
+
+static char msg_counter_str[] = "\n0\n\0\0";
+
+void ignore(ssize_t return_value) { (void)return_value; }
+
+void sigint_handler() {
+    if (write(STDOUT_FD, msg_counter_str, strlen(msg_counter_str)) <
+        strlen(msg_counter_str)) {
+        ignore(write(STDERR_FD, WRITE_FAILED, strlen(WRITE_FAILED)));
+        _exit(EXIT_FAILURE);
+    } else {
+        _exit(EXIT_SUCCESS);
+    }
+}
+
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = box_name
 int main(int argc, char **argv) {
 
-    // TODO: Processar CTRL + C
+    signal(SIGINT, sigint_handler);
+
     if (argc == 2 && !strcmp(argv[1], "--help")) {
         printf("usage: ./sub <register_pipe> <pipe_name> <box_name>\n");
         return 0;
@@ -90,9 +110,10 @@ int main(int argc, char **argv) {
         ret = read(sub_pipe_fd, buffer, PUB_MSG_SIZE);
 
         if (ret == 0) {
-            // ret == 0 indicates EOF
+            // ret == 0 indicates EOF, mbroker closed the pipe
             // print the number of messages received
             printf("%d\n", msg_counter);
+            printf("[INFO]: mbroker forced the end of the session.\n");
             break;
         } else if (ret == -1) {
             // ret == -1 indicates error
@@ -107,6 +128,7 @@ int main(int argc, char **argv) {
         }
 
         msg_counter++;
+        sprintf(msg_counter_str, "\n%d\n", msg_counter);
         fprintf(stdout, "%s\n", buffer + OPCODE_SIZE);
     }
 

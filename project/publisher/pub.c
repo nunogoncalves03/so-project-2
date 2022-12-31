@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -11,6 +12,8 @@
 
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = box_name
 int main(int argc, char **argv) {
+
+    signal(SIGPIPE, SIG_IGN);
 
     if (argc == 2 && !strcmp(argv[1], "--help")) {
         printf("usage: ./pub <register_pipe> <pipe_name> <box_name>\n");
@@ -90,24 +93,38 @@ int main(int argc, char **argv) {
 
         if (i < MSG_MAX_SIZE) {
             // the msg hasn't exceeded the max size (1024)
-            if (c == '\n' || (c == EOF && i > 1)) {
+            if ((c == '\n' || c == EOF) && i > 1) {
                 // we've reached the end of the msg, let's send it
                 buffer[i] = '\0';
                 i = 1;
-                if (write(pub_pipe_fd, buffer, PUB_MSG_SIZE) < PUB_MSG_SIZE) {
-                    fprintf(stderr, "[ERR] Write failed: %s\n",
-                            strerror(errno));
-                    exit(EXIT_FAILURE);
+                if (write(pub_pipe_fd, buffer, PUB_MSG_SIZE) <
+                    (ssize_t)PUB_MSG_SIZE) {
+                    if (errno == EPIPE) {
+                        printf(
+                            "[INFO]: mbroker forced the end of the session.\n");
+                        break;
+                    } else {
+                        fprintf(stderr, "[ERR] Write failed: %s\n",
+                                strerror(errno));
+                        exit(EXIT_FAILURE);
+                    }
                 }
-            } else {
+            } else if (c != '\n' && c != EOF) {
                 buffer[i++] = c;
             }
         } else if (i == MSG_MAX_SIZE) {
             // the msg size is >= 1023, so we need to truncate
             buffer[i++] = '\0';
-            if (write(pub_pipe_fd, buffer, PUB_MSG_SIZE) < PUB_MSG_SIZE) {
-                fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-                exit(EXIT_FAILURE);
+            if (write(pub_pipe_fd, buffer, PUB_MSG_SIZE) <
+                (ssize_t)PUB_MSG_SIZE) {
+                if (errno == EPIPE) {
+                    printf("[INFO]: mbroker forced the end of the session.\n");
+                    break;
+                } else {
+                    fprintf(stderr, "[ERR] Write failed: %s\n",
+                            strerror(errno));
+                    exit(EXIT_FAILURE);
+                }
             }
 
             // if the msg is exactly 1023 char long, we don't want to enter
