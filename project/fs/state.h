@@ -71,15 +71,4 @@ pthread_mutex_t *get_free_open_file_entries_lock();
 pthread_mutex_t *get_free_blocks_lock();
 pthread_rwlock_t *get_inode_locks();
 
-void mutex_init(pthread_mutex_t *lock);
-void mutex_lock(pthread_mutex_t *lock);
-void mutex_unlock(pthread_mutex_t *lock);
-void mutex_destroy(pthread_mutex_t *lock);
-
-void rwl_init(pthread_rwlock_t *lock);
-void rwl_rdlock(pthread_rwlock_t *lock);
-void rwl_wrlock(pthread_rwlock_t *lock);
-void rwl_unlock(pthread_rwlock_t *lock);
-void rwl_destroy(pthread_rwlock_t *lock);
-
 #endif // STATE_H

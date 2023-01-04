@@ -2,6 +2,7 @@
 #include "common.h"
 #include "logging.h"
 #include "operations.h"
+#include "producer-consumer.h"
 
 #include <errno.h>
 #include <fcntl.h>

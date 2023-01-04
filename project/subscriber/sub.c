@@ -13,8 +13,9 @@
 #define STDOUT_FD 1
 #define STDERR_FD 2
 #define WRITE_FAILED "[ERR] write failed.\n"
+#define MSG_COUNTER_SIZE 8  // minimum size to support the 5 digits of uint16_t
 
-static char msg_counter_str[] = "\n0\n\0\0";
+static char msg_counter_str[MSG_COUNTER_SIZE] = "\n0\n";
 
 void ignore(ssize_t return_value) { (void)return_value; }
 
@@ -104,7 +105,7 @@ int main(int argc, char **argv) {
 
     char buffer[PUB_MSG_SIZE];
     ssize_t ret;
-    int msg_counter = 0;
+    uint16_t msg_counter = 0;
     // Read incoming messages until mbroker closes the pipe
     while (1) {
         ret = read(sub_pipe_fd, buffer, PUB_MSG_SIZE);

@@ -2,6 +2,8 @@
 #include "betterassert.h"
 #include "config.h"
 #include "state.h"
+#include "locks.h"
+
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdbool.h>
