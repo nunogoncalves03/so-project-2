@@ -122,6 +122,10 @@ int main(int argc, char **argv) {
 
     if (ret == 0) {
         // ret == 0 indicates EOF
+        // Both box creation and removal require a response from mbroker, so the
+        // only way mbroker doesn't send anything back is if we are listing
+        // boxes and there are none
+        INFO("NO BOXES FOUND");
         return 0;
     } else if (ret == -1) {
         // ret == -1 indicates error
