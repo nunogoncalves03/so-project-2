@@ -13,7 +13,10 @@
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = box_name
 int main(int argc, char **argv) {
 
-    signal(SIGPIPE, SIG_IGN);
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        fprintf(stderr, "[ERR]: signal error\n");
+        exit(EXIT_FAILURE);
+    }
 
     if (argc == 2 && !strcmp(argv[1], "--help")) {
         printf("usage: ./pub <register_pipe> <pipe_name> <box_name>\n");

@@ -13,7 +13,7 @@
 #define STDOUT_FD 1
 #define STDERR_FD 2
 #define WRITE_FAILED "[ERR] write failed.\n"
-#define MSG_COUNTER_SIZE 8  // minimum size to support the 5 digits of uint16_t
+#define MSG_COUNTER_SIZE 8 // minimum size to support the 5 digits of uint16_t
 
 static char msg_counter_str[MSG_COUNTER_SIZE] = "\n0\n";
 
@@ -32,7 +32,10 @@ void sigint_handler() {
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = box_name
 int main(int argc, char **argv) {
 
-    signal(SIGINT, sigint_handler);
+    if (signal(SIGINT, sigint_handler) == SIG_ERR) {
+        fprintf(stderr, "[ERR]: signal error\n");
+        exit(EXIT_FAILURE);
+    }
 
     if (argc == 2 && !strcmp(argv[1], "--help")) {
         printf("usage: ./sub <register_pipe> <pipe_name> <box_name>\n");

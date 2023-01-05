@@ -17,8 +17,7 @@ extern log_level_t g_level;
     do {                                                                       \
         char buf[2048];                                                        \
         snprintf(buf, 2048, __VA_ARGS__);                                      \
-        fprintf(stderr, "[INFO]:  %s:%d :: %s :: %s\n", __FILE__, __LINE__,    \
-                __func__, buf);                                                \
+        fprintf(stderr, "[INFO]:  %s :: %s\n", __func__, buf);                 \
     } while (0);
 
 #define PANIC(...)                                                             \
@@ -45,8 +44,7 @@ extern log_level_t g_level;
         if (g_level == LOG_NORMAL || g_level == LOG_VERBOSE) {                 \
             char buf[2048];                                                    \
             snprintf(buf, 2048, __VA_ARGS__);                                  \
-            fprintf(stderr, "[LOG]:   %s:%d :: %s :: %s\n", __FILE__,          \
-                    __LINE__, __func__, buf);                                  \
+            fprintf(stderr, "[LOG]:   %s :: %s\n", __func__, buf);             \
         }                                                                      \
     } while (0);
 

@@ -150,9 +150,9 @@ int main(int argc, char **argv) {
                 exit(EXIT_FAILURE);
             }
 
-            printf("%d\n%s\n", return_code, error_msg);
+            printf("ERROR: %s\n", error_msg);
         } else {
-            printf("%d\n", return_code);
+            printf("OK\n");
         }
 
         break;

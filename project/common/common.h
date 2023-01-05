@@ -18,7 +18,7 @@
 #define RETURN_CODE_SIZE sizeof(int32_t)
 #define ERROR_MSG_SIZE 1024
 #define BOX_RESPONSE OPCODE_SIZE + RETURN_CODE_SIZE + ERROR_MSG_SIZE
-#define MAX_N_BOXES 23 // TODO: Can we even do this?
+#define MAX_N_BOXES 23
 #define BOX_SIZE 1024
 #define LAST_SIZE sizeof(uint8_t)
 #define LIST_REQUEST_SIZE OPCODE_SIZE + PIPENAME_SIZE

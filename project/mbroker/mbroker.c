@@ -39,7 +39,7 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    int register_pipe_fd;
+    int register_pipe_fd, aux_reg_pipe_fd;
 
     // Remove pipe if it exists
     if (unlink(argv[1]) != 0 && errno != ENOENT) {
@@ -60,6 +60,15 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    // Open it for writing, so after dealing with all registrations pending,
+    // reading from the pipe won't return 0 (which means there's no writers),
+    // and instead will be waiting (passively) for someone to write something to
+    // the pipe, since there's always at least one writer, the mbroker itself
+    if ((aux_reg_pipe_fd = open(argv[1], O_WRONLY)) == -1) {
+        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
     char opcode;
 
     // Loop while dealing with clients
@@ -69,22 +78,8 @@ int main(int argc, char **argv) {
 
         if (ret == 0) {
             // ret == 0 indicates EOF
-            fprintf(stderr, "[INFO]: pipe closed\n");
-
-            // TODO: reopen?
-            // Close the register pipe
-            if (close(register_pipe_fd) == -1) {
-                fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-                exit(EXIT_FAILURE);
-            }
-
-            // Reopen it for reading
-            if ((register_pipe_fd = open(argv[1], O_RDONLY)) == -1) {
-                fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-                exit(EXIT_FAILURE);
-            }
-
-            continue;
+            fprintf(stderr, "[ERR]: registration pipe is closed\n");
+            exit(EXIT_FAILURE);
         } else if (ret == -1) {
             // ret == -1 indicates error
             fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
@@ -150,6 +145,11 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    if (close(aux_reg_pipe_fd) == -1) {
+        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
     return 0;
 }
 
@@ -185,6 +185,19 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
     }
 
     box_t *box = &boxes[i_box];
+
+    // Check if box is full
+    if (box->box_size == BOX_SIZE) {
+        // TODO: alertar subs que ja n vai ser escrito mais nada
+        fprintf(stderr, "[INFO]: Box %s is full\n", box_name);
+
+        // Close the pub pipe
+        if (close(pub_pipe_fd) == -1) {
+            fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        }
+        return;
+    }
 
     // TODO: atencao mutex
     // Check if there's no pub already in the given box
@@ -239,10 +252,13 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
                 exit(EXIT_FAILURE);
             } else { // Couldn't write whole message
                 // TODO: alertar subs que ja n vai ser escrito mais nada
-                fprintf(stderr, "[ERR]: Box %s is full\n", box_name);
+                fprintf(stderr, "[INFO]: Box %s is full\n", box_name);
+                box->box_size += (uint64_t)ret;
                 break;
             }
         }
+
+        box->box_size += (uint64_t)ret;
     }
 
     if (tfs_close(box_fd) == -1) {
@@ -299,7 +315,6 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
     response[0] = OPCODE_SUB_MSG;
 
     // Read the messages from the box
-    // TODO: bloco apenas pode ter 1024, q é o max de uma msg
     if ((ret = tfs_read(box_fd, buffer, BOX_SIZE)) == -1) {
         fprintf(stderr, "[ERR]: tfs_read failed\n");
         exit(EXIT_FAILURE);
@@ -377,7 +392,7 @@ void box_creation(char *man_pipe_path, char *box_name) {
 
                     box_t new_box;
                     strcpy(new_box.box_name, box_name);
-                    new_box.box_size = BOX_SIZE;
+                    new_box.box_size = 0;
                     new_box.n_publishers = 0;
                     new_box.n_subscribers = 0;
 
