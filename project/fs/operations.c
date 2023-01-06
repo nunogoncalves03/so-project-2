@@ -1,8 +1,8 @@
 #include "operations.h"
 #include "betterassert.h"
 #include "config.h"
-#include "state.h"
 #include "locks.h"
+#include "state.h"
 
 #include <fcntl.h>
 #include <pthread.h>

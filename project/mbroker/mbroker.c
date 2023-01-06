@@ -246,6 +246,10 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
         // Copy only the msg itself
         strcpy(msg, buffer + OPCODE_SIZE);
 
+        // Check if box has been deleted by a manager in the meantime
+        if (free_boxes[i_box] == 1)
+            break;
+
         if ((ret = tfs_write(box_fd, msg, strlen(msg) + 1)) < strlen(msg) + 1) {
             if (ret == -1) { // error
                 fprintf(stderr, "[ERR]: tfs_write failed\n");
@@ -313,6 +317,12 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
     char buffer[MSG_MAX_SIZE];
     char response[PUB_MSG_SIZE];
     response[0] = OPCODE_SUB_MSG;
+
+    // Check if box has been deleted by a manager in the meantime
+    // if (free_boxes[i_box] == 1) {
+    // break;  // TODO: quando o sub tiver bem feito, e mandar a msg
+    // recebida e dps terminar, ou terminar aqui antes de ler?
+    // }
 
     // Read the messages from the box
     if ((ret = tfs_read(box_fd, buffer, BOX_SIZE)) == -1) {

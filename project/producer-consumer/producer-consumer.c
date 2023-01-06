@@ -8,10 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-
 int pcq_create(pc_queue_t *queue, size_t capacity) {
     if (capacity <= 0)
-        return -1;  // Can't create a queue with null or negative capacity
+        return -1; // Can't create a queue with null or negative capacity
     queue->pcq_buffer = (void **)malloc(capacity * sizeof(void *));
     if (queue->pcq_buffer == NULL) {
         return -1;

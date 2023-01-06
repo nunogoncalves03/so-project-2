@@ -124,8 +124,11 @@ int main(int argc, char **argv) {
         // ret == 0 indicates EOF
         // Both box creation and removal require a response from mbroker, so the
         // only way mbroker doesn't send anything back is if we are listing
-        // boxes and there are none
-        INFO("NO BOXES FOUND");
+        // boxes and there are none.
+        // De acordo com o enunciado, deveriamos enviar uma caixa vazia e "last"
+        // = 1, mas devido a usarmos structs essa solução torna-se
+        // desnecessariamente mais complicada, pelo que fazemos desta forma
+        fprintf(stdout, "NO BOXES FOUND\n");
         return 0;
     } else if (ret == -1) {
         // ret == -1 indicates error
@@ -154,9 +157,9 @@ int main(int argc, char **argv) {
                 exit(EXIT_FAILURE);
             }
 
-            printf("ERROR: %s\n", error_msg);
+            fprintf(stdout, "ERROR %s\n", error_msg);
         } else {
-            printf("OK\n");
+            fprintf(stdout, "OK\n");
         }
 
         break;
