@@ -1,6 +1,8 @@
 #ifndef _MBROKER_H__
 #define _MBROKER_H__
 
+#include "producer-consumer.h"
+
 /* Searches for the given box
  * Input:
  *   - box_name: the box's name
@@ -8,6 +10,13 @@
  * Returns the index of the box if it exists, -1 otherwise.
  */
 int box_lookup(const char *box_name);
+
+/* Pops a registration from the given queue and processes it
+ * Input:
+ *   - queue: a pointer to the queue
+ *
+ */
+void handle_registration(pc_queue_t *queue);
 
 /* Receives messages from a publsiher and stores them into the given box
  *

@@ -22,12 +22,16 @@ int main(int argc, char **argv) {
     for (int i = 0; i < MAX_N_BOXES; i++)
         free_boxes[i] = 1;
 
+    set_log_level(LOG_VERBOSE);
+
     if (argc == 2 && !strcmp(argv[1], "--help")) {
         printf("usage: ./mbroker <pipename> <max_sessions>\n");
         return 0;
     }
 
-    if (argc != 3) {
+    size_t max_sessions;
+
+    if (argc != 3 || sscanf(argv[2], "%ld", &max_sessions) == 0) {
         fprintf(stderr, "mbroker: Invalid arguments.\nTry './mbroker --help'"
                         " for more information.\n");
         exit(EXIT_FAILURE);
@@ -35,29 +39,24 @@ int main(int argc, char **argv) {
 
     // Init the file system
     if (tfs_init(NULL) == -1) {
-        fprintf(stderr, "[ERR] tfs_init failed.\n");
-        exit(EXIT_FAILURE);
+        PANIC("tfs_init failed");
     }
 
     int register_pipe_fd, aux_reg_pipe_fd;
 
     // Remove pipe if it exists
     if (unlink(argv[1]) != 0 && errno != ENOENT) {
-        fprintf(stderr, "[ERR]: unlink(%s) failed: %s\n", argv[1],
-                strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("unlink(%s) failed: %s", argv[1], strerror(errno));
     }
 
     // Create the register_pipe
     if (mkfifo(argv[1], 0640) != 0) {
-        fprintf(stderr, "[ERR] mkfifo failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("mkfifo failed: %s", strerror(errno));
     }
 
     // Open it for reading
     if ((register_pipe_fd = open(argv[1], O_RDONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     // Open it for writing, so after dealing with all registrations pending,
@@ -65,8 +64,17 @@ int main(int argc, char **argv) {
     // and instead will be waiting (passively) for someone to write something to
     // the pipe, since there's always at least one writer, the mbroker itself
     if ((aux_reg_pipe_fd = open(argv[1], O_WRONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
+    }
+
+    // Init the producer-consumer queue
+    pc_queue_t *queue = (pc_queue_t *)malloc(sizeof(pc_queue_t));
+    if (queue == NULL) {
+        PANIC("couldn't malloc queue")
+    }
+
+    if (pcq_create(queue, max_sessions / 2) == -1) { // TODO: * 2
+        PANIC("couldn't create pc_queue")
     }
 
     char opcode;
@@ -78,12 +86,10 @@ int main(int argc, char **argv) {
 
         if (ret == 0) {
             // ret == 0 indicates EOF
-            fprintf(stderr, "[ERR]: registration pipe is closed\n");
-            exit(EXIT_FAILURE);
+            PANIC("registration pipe is closed")
         } else if (ret == -1) {
             // ret == -1 indicates error
-            fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("read failed: %s", strerror(errno))
         }
 
         switch (opcode) {
@@ -93,61 +99,63 @@ int main(int argc, char **argv) {
         case OPCODE_BOX_CREAT:  // Box creation
         case OPCODE_BOX_REMOVE: // Box removal
         {
-            char pipe_path[PIPENAME_SIZE];
-            // Read the client pipe path, from where we will interact with him
-            if (read(register_pipe_fd, pipe_path, PIPENAME_SIZE) <
-                PIPENAME_SIZE) {
-                fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
-                exit(EXIT_FAILURE);
+            void *registration = calloc(REGISTRATION_SIZE, sizeof(char));
+            if (registration == NULL) {
+                PANIC("couldn't malloc registration");
             }
 
-            char box_name[BOXNAME_SIZE];
-            // Read the box name
-            if (read(register_pipe_fd, box_name, BOXNAME_SIZE) < BOXNAME_SIZE) {
-                fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
-                exit(EXIT_FAILURE);
+            // copy OP_CODE
+            memcpy(registration, &opcode, OPCODE_SIZE);
+
+            // Read the rest of the registration
+            if (read(register_pipe_fd, registration + OPCODE_SIZE,
+                     REGISTRATION_SIZE - OPCODE_SIZE) <
+                REGISTRATION_SIZE - OPCODE_SIZE) {
+                PANIC("read failed: %s", strerror(errno));
             }
 
-            if (opcode == OPCODE_PUB_REG) // publisher
-                pub_connect(pipe_path, box_name);
-            else if (opcode == OPCODE_SUB_REG) // subscriber
-                sub_connect(pipe_path, box_name);
-            else if (opcode == OPCODE_BOX_CREAT) // box creation
-                box_creation(pipe_path, box_name);
-            else if (opcode == OPCODE_BOX_REMOVE) // box removal
-                box_removal(pipe_path, box_name);
+            pcq_enqueue(queue, registration);
+
+            handle_registration(queue);
 
             break;
         }
-
         case OPCODE_BOX_LIST: { // Box listing
-            char pipe_path[PIPENAME_SIZE];
-            // Read the client pipe path, from where we will interact with him
-            if (read(register_pipe_fd, pipe_path, PIPENAME_SIZE) <
-                PIPENAME_SIZE) {
-                fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
-                exit(EXIT_FAILURE);
+            void *registration = calloc(LIST_REQUEST_SIZE, sizeof(char));
+            if (registration == NULL) {
+                PANIC("couldn't malloc registration");
             }
 
-            box_listing(pipe_path);
+            // copy OP_CODE
+            memcpy(registration, &opcode, OPCODE_SIZE);
+
+            // Read the rest of the registration
+            if (read(register_pipe_fd, registration + OPCODE_SIZE,
+                     LIST_REQUEST_SIZE - OPCODE_SIZE) <
+                LIST_REQUEST_SIZE - OPCODE_SIZE) {
+                PANIC("read failed: %s", strerror(errno));
+            }
+
+            pcq_enqueue(queue, registration);
+
+            handle_registration(queue);
 
             break;
         }
         default:
-            fprintf(stderr, "Internal error: Invalid OP_CODE!\n");
-            exit(EXIT_FAILURE);
+            PANIC("Internal error: Invalid OP_CODE!");
             break;
         }
     }
 
+    free(queue);
+
     if (close(register_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 
     if (close(aux_reg_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 
     return 0;
@@ -161,25 +169,82 @@ int box_lookup(const char *box_name) {
     return -1;
 }
 
+void handle_registration(pc_queue_t *queue) {
+    while (1) {
+        char *registration = (char *)pcq_dequeue(queue);
+        LOG("Received a registration");
+
+        char opcode = registration[0];
+        switch (opcode) {
+        case OPCODE_PUB_REG: // publisher registration
+        case OPCODE_SUB_REG: // subscriber registration
+        /* Manager requests */
+        case OPCODE_BOX_CREAT:  // Box creation
+        case OPCODE_BOX_REMOVE: // Box removal
+        {
+            char pipe_path[PIPENAME_SIZE];
+            // Copy the client pipe path, from where we will interact with him
+            memcpy(pipe_path, registration + OPCODE_SIZE, PIPENAME_SIZE);
+
+            char box_name[BOXNAME_SIZE];
+            // Copy the box name
+            memcpy(box_name, registration + OPCODE_SIZE + PIPENAME_SIZE,
+                   BOXNAME_SIZE);
+
+            // The registration buffer was dinamicaly alloced by mbroker, we
+            // are responsible for freeing it
+            free(registration);
+
+            if (opcode == OPCODE_PUB_REG) // publisher
+                pub_connect(pipe_path, box_name);
+            else if (opcode == OPCODE_SUB_REG) // subscriber
+                sub_connect(pipe_path, box_name);
+            else if (opcode == OPCODE_BOX_CREAT) // box creation
+                box_creation(pipe_path, box_name);
+            else if (opcode == OPCODE_BOX_REMOVE) // box removal
+                box_removal(pipe_path, box_name);
+
+            break;
+        }
+        case OPCODE_BOX_LIST: { // Box listing
+            char pipe_path[PIPENAME_SIZE];
+            // Copy the client pipe path, from where we will interact with him
+            memcpy(pipe_path, registration + OPCODE_SIZE, PIPENAME_SIZE);
+
+            // The registration buffer was dinamicaly alloced by mbroker, we
+            // are responsible for freeing it
+            free(registration);
+
+            box_listing(pipe_path);
+
+            break;
+        }
+        default:
+            PANIC("Internal error: Invalid OP_CODE!");
+            break;
+        }
+
+        break; // TODO: remove in the future
+    }
+}
+
 void pub_connect(char *pub_pipe_path, char *box_name) {
     int pub_pipe_fd, box_fd;
 
     // Open the pub_pipe for reading
     if ((pub_pipe_fd = open(pub_pipe_path, O_RDONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     int i_box = box_lookup(box_name);
 
     // Check if box exists
     if (i_box == -1) {
-        fprintf(stderr, "[ERR] Box %s doesn't exist.\n", box_name);
+        INFO("box %s doesn't exist", box_name);
 
         // Close the pub pipe
         if (close(pub_pipe_fd) == -1) {
-            fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("close failed: %s", strerror(errno));
         }
         return;
     }
@@ -189,12 +254,11 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
     // Check if box is full
     if (box->box_size == BOX_SIZE) {
         // TODO: alertar subs que ja n vai ser escrito mais nada
-        fprintf(stderr, "[INFO]: Box %s is full\n", box_name);
+        INFO("box %s is full", box_name);
 
         // Close the pub pipe
         if (close(pub_pipe_fd) == -1) {
-            fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("close failed: %s", strerror(errno));
         }
         return;
     }
@@ -202,12 +266,11 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
     // TODO: atencao mutex
     // Check if there's no pub already in the given box
     if (box->n_publishers == 1) {
-        fprintf(stderr, "[ERR] There's already a pub in box %s.\n", box_name);
+        INFO("there's already a pub in box %s", box_name);
 
         // Close the pub pipe
         if (close(pub_pipe_fd) == -1) {
-            fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("close failed: %s", strerror(errno));
         }
         return;
     }
@@ -216,8 +279,7 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
 
     // Open the box to write the messages
     if ((box_fd = tfs_open(box_name, TFS_O_APPEND)) == -1) {
-        fprintf(stderr, "[ERR] tfs_open failed.\n");
-        exit(EXIT_FAILURE);
+        PANIC("tfs_open failed");
     }
 
     ssize_t ret;
@@ -233,14 +295,12 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
             break;
         } else if (ret == -1) {
             // ret == -1 indicates error
-            fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("read failed: %s", strerror(errno));
         }
 
         // Verify code
         if (buffer[0] != OPCODE_PUB_MSG) {
-            fprintf(stderr, "Internal error: Invalid OP_CODE!\n");
-            exit(EXIT_FAILURE);
+            PANIC("Internal error: Invalid OP_CODE!");
         }
 
         // Copy only the msg itself
@@ -252,11 +312,10 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
 
         if ((ret = tfs_write(box_fd, msg, strlen(msg) + 1)) < strlen(msg) + 1) {
             if (ret == -1) { // error
-                fprintf(stderr, "[ERR]: tfs_write failed\n");
-                exit(EXIT_FAILURE);
+                PANIC("tfs_write failed");
             } else { // Couldn't write whole message
                 // TODO: alertar subs que ja n vai ser escrito mais nada
-                fprintf(stderr, "[INFO]: Box %s is full\n", box_name);
+                INFO("box %s is full", box_name);
                 box->box_size += (uint64_t)ret;
                 break;
             }
@@ -266,15 +325,13 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
     }
 
     if (tfs_close(box_fd) == -1) {
-        fprintf(stderr, "[ERR] tfs_close failed.\n");
-        exit(EXIT_FAILURE);
+        PANIC("tfs_close failed");
     }
 
     box->n_publishers = 0;
 
     if (close(pub_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 }
 
@@ -283,20 +340,18 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
 
     // Open the sub_pipe for writing messages
     if ((sub_pipe_fd = open(sub_pipe_path, O_WRONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     int i_box = box_lookup(box_name);
 
     // Check if box exists
     if (i_box == -1) {
-        fprintf(stderr, "[ERR] Box %s doesn't exist.\n", box_name);
+        INFO("box %s doesn't exist", box_name);
 
         // Close the sub_pipe
         if (close(sub_pipe_fd) == -1) {
-            fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("close failed: %s", strerror(errno));
         }
 
         return;
@@ -309,8 +364,7 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
 
     // Open the box to read the messages
     if ((box_fd = tfs_open(box_name, 0)) == -1) {
-        fprintf(stderr, "[ERR] tfs_open failed.\n");
-        exit(EXIT_FAILURE);
+        PANIC("tfs_open failed");
     }
 
     ssize_t ret;
@@ -326,8 +380,7 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
 
     // Read the messages from the box
     if ((ret = tfs_read(box_fd, buffer, BOX_SIZE)) == -1) {
-        fprintf(stderr, "[ERR]: tfs_read failed\n");
-        exit(EXIT_FAILURE);
+        PANIC("tfs_read failed");
     }
 
     size_t len = strlen(buffer);
@@ -342,8 +395,7 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
         // Send each message to sub
         if (write(sub_pipe_fd, response, PUB_MSG_SIZE) < PUB_MSG_SIZE) {
             // TODO: ignore SIGPIPE and end session
-            fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("write failed: %s", strerror(errno))
         }
         ptr_buffer += len + 1;
         if (_ret > 0) {
@@ -354,15 +406,13 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
     }
 
     if (tfs_close(box_fd) == -1) {
-        fprintf(stderr, "[ERR] tfs_close failed.\n");
-        exit(EXIT_FAILURE);
+        PANIC("tfs_close failed");
     }
 
     box->n_subscribers--;
 
     if (close(sub_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 }
 
@@ -371,8 +421,7 @@ void box_creation(char *man_pipe_path, char *box_name) {
 
     // Open the man_pipe for writing messages
     if ((man_pipe_fd = open(man_pipe_path, O_WRONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     /* Protocol */
@@ -415,8 +464,7 @@ void box_creation(char *man_pipe_path, char *box_name) {
         if (box_fd != -1) {
             if (tfs_close(box_fd) == -1) {
                 // Shouldn't happen
-                fprintf(stderr, "Internal error: Box close failed!\n");
-                exit(EXIT_FAILURE);
+                PANIC("Internal error: Box close failed!");
             }
         }
     }
@@ -425,27 +473,23 @@ void box_creation(char *man_pipe_path, char *box_name) {
 
     // OP_CODE
     if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
-        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("write failed: %s", strerror(errno));
     }
 
     // return_code
     if (write(man_pipe_fd, &return_code, RETURN_CODE_SIZE) < RETURN_CODE_SIZE) {
-        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("write failed: %s", strerror(errno));
     }
 
     // error message
     if (return_code == -1) {
         if (write(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE) {
-            fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("write failed: %s", strerror(errno));
         }
     }
 
     if (close(man_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 }
 
@@ -454,8 +498,7 @@ void box_removal(char *man_pipe_path, char *box_name) {
 
     // Open the man_pipe for writing messages
     if ((man_pipe_fd = open(man_pipe_path, O_WRONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     /* Protocol */
@@ -488,27 +531,23 @@ void box_removal(char *man_pipe_path, char *box_name) {
 
     // OP_CODE
     if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
-        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("write failed: %s", strerror(errno));
     }
 
     // return_code
     if (write(man_pipe_fd, &return_code, RETURN_CODE_SIZE) < RETURN_CODE_SIZE) {
-        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("write failed: %s", strerror(errno));
     }
 
     // error message
     if (return_code == -1) {
         if (write(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE) {
-            fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("write failed: %s", strerror(errno));
         }
     }
 
     if (close(man_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 }
 
@@ -517,8 +556,7 @@ void box_listing(char *man_pipe_path) {
 
     // Open the man_pipe for writing messages
     if ((man_pipe_fd = open(man_pipe_path, O_WRONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     /* Protocol */
@@ -538,24 +576,18 @@ void box_listing(char *man_pipe_path) {
             if (free_boxes[i] == 0) {
                 // Send the OP_CODE
                 if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
-                    fprintf(stderr, "[ERR]: write failed: %s\n",
-                            strerror(errno));
-                    exit(EXIT_FAILURE);
+                    PANIC("write failed: %s", strerror(errno));
                 }
 
                 // Send the "last" byte
                 if (write(man_pipe_fd, &last, LAST_SIZE) < LAST_SIZE) {
-                    fprintf(stderr, "[ERR]: write failed: %s\n",
-                            strerror(errno));
-                    exit(EXIT_FAILURE);
+                    PANIC("write failed: %s", strerror(errno));
                 }
 
                 // Send the box
                 if (write(man_pipe_fd, last_box, sizeof(box_t)) <
                     sizeof(box_t)) {
-                    fprintf(stderr, "[ERR]: write failed: %s\n",
-                            strerror(errno));
-                    exit(EXIT_FAILURE);
+                    PANIC("write failed: %s", strerror(errno));
                 }
 
                 last_box = &boxes[i];
@@ -569,23 +601,19 @@ void box_listing(char *man_pipe_path) {
 
         // Send the OP_CODE
         if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
-            fprintf(stderr, "[ERR]: write failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("write failed: %s", strerror(errno));
         }
         // Send the "last" byte
         if (write(man_pipe_fd, &last, LAST_SIZE) < LAST_SIZE) {
-            fprintf(stderr, "[ERR]: write failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("write failed: %s", strerror(errno));
         }
         // Send the box
         if (write(man_pipe_fd, last_box, sizeof(box_t)) < sizeof(box_t)) {
-            fprintf(stderr, "[ERR]: write failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("write failed: %s", strerror(errno));
         }
     }
 
     if (close(man_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR]: Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 }

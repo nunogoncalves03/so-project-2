@@ -20,6 +20,7 @@ static char msg_counter_str[MSG_COUNTER_SIZE] = "\n0\n";
 void ignore(ssize_t return_value) { (void)return_value; }
 
 void sigint_handler() {
+    // TODO: this is scuffed af
     if (write(STDOUT_FD, msg_counter_str, strlen(msg_counter_str)) <
         strlen(msg_counter_str)) {
         ignore(write(STDERR_FD, WRITE_FAILED, strlen(WRITE_FAILED)));
@@ -33,8 +34,7 @@ void sigint_handler() {
 int main(int argc, char **argv) {
 
     if (signal(SIGINT, sigint_handler) == SIG_ERR) {
-        fprintf(stderr, "[ERR]: signal error\n");
-        exit(EXIT_FAILURE);
+        PANIC("signal error");
     }
 
     if (argc == 2 && !strcmp(argv[1], "--help")) {
@@ -52,27 +52,22 @@ int main(int argc, char **argv) {
 
     // Open the register pipe for writing
     if ((register_pipe_fd = open(argv[1], O_WRONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     // Check if the pipe name is valid
     if (strlen(argv[2]) > PIPENAME_SIZE - 1) {
-        fprintf(stderr, "[ERR] named_pipe name bigger than supported\n");
-        exit(EXIT_FAILURE);
+        PANIC("named_pipe name bigger than supported");
     }
 
     // Remove sub_pipe if it exists
     if (unlink(argv[2]) != 0 && errno != ENOENT) {
-        fprintf(stderr, "[ERR]: unlink(%s) failed: %s\n", argv[2],
-                strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("unlink(%s) failed: %s", argv[2], strerror(errno));
     }
 
     // Create sub_pipe, through which we will read messages from the mbroker
     if (mkfifo(argv[2], 0640) != 0) {
-        fprintf(stderr, "[ERR] mkfifo failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("mkfifo failed: %s", strerror(errno));
     }
 
     /* Protocol */
@@ -91,19 +86,16 @@ int main(int argc, char **argv) {
     // Send registration to mbroker
     if (write(register_pipe_fd, registration, REGISTRATION_SIZE) <
         REGISTRATION_SIZE) {
-        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("write failed: %s", strerror(errno));
     }
 
     if (close(register_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR] Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 
     // Open sub_pipe for reading messages
     if ((sub_pipe_fd = open(argv[2], O_RDONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     char buffer[PUB_MSG_SIZE];
@@ -117,18 +109,16 @@ int main(int argc, char **argv) {
             // ret == 0 indicates EOF, mbroker closed the pipe
             // print the number of messages received
             printf("%d\n", msg_counter);
-            printf("[INFO]: mbroker forced the end of the session.\n");
+            INFO("mbroker forced the end of the session");
             break;
         } else if (ret == -1) {
             // ret == -1 indicates error
-            fprintf(stderr, "[ERR]: read failed: %s\n", strerror(errno));
-            exit(EXIT_FAILURE);
+            PANIC("read failed: %s", strerror(errno));
         }
 
         // Verify code
         if (buffer[0] != OPCODE_SUB_MSG) {
-            fprintf(stderr, "Internal error: Invalid OP_CODE!\n");
-            exit(EXIT_FAILURE);
+            PANIC("Internal error: Invalid OP_CODE!");
         }
 
         msg_counter++;
@@ -138,8 +128,7 @@ int main(int argc, char **argv) {
 
     // TODO: devemos fechar?
     if (close(sub_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR] Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 
     // TODO: unlink named pipe

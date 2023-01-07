@@ -14,8 +14,7 @@
 int main(int argc, char **argv) {
 
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        fprintf(stderr, "[ERR]: signal error\n");
-        exit(EXIT_FAILURE);
+        PANIC("signal error");
     }
 
     if (argc == 2 && !strcmp(argv[1], "--help")) {
@@ -33,27 +32,22 @@ int main(int argc, char **argv) {
 
     // Open the register pipe for writing
     if ((register_pipe_fd = open(argv[1], O_WRONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     // Check if the pipe name is valid
     if (strlen(argv[2]) > PIPENAME_SIZE - 1) {
-        fprintf(stderr, "[ERR] named_pipe name bigger than supported\n");
-        exit(EXIT_FAILURE);
+        PANIC("named_pipe name bigger than supported");
     }
 
     // Remove pub_pipe if it exists
     if (unlink(argv[2]) != 0 && errno != ENOENT) {
-        fprintf(stderr, "[ERR]: unlink(%s) failed: %s\n", argv[2],
-                strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("unlink(%s) failed: %s", argv[2], strerror(errno));
     }
 
     // Create pub_pipe, through which we will send messages to the mbroker
     if (mkfifo(argv[2], 0640) != 0) {
-        fprintf(stderr, "[ERR] mkfifo failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("mkfifo failed: %s", strerror(errno));
     }
 
     /* Protocol */
@@ -72,19 +66,16 @@ int main(int argc, char **argv) {
     // Send registration to mbroker
     if (write(register_pipe_fd, registration, REGISTRATION_SIZE) <
         REGISTRATION_SIZE) {
-        fprintf(stderr, "[ERR] Write failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("write failed: %s", strerror(errno));
     }
 
     if (close(register_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR] Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 
     // Open pub_pipe for writing messages
     if ((pub_pipe_fd = open(argv[2], O_WRONLY)) == -1) {
-        fprintf(stderr, "[ERR] Open failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("open failed: %s", strerror(errno));
     }
 
     char buffer[PUB_MSG_SIZE];
@@ -103,13 +94,10 @@ int main(int argc, char **argv) {
                 if (write(pub_pipe_fd, buffer, PUB_MSG_SIZE) <
                     (ssize_t)PUB_MSG_SIZE) {
                     if (errno == EPIPE) {
-                        printf(
-                            "[INFO]: mbroker forced the end of the session.\n");
+                        INFO("mbroker forced the end of the session");
                         break;
                     } else {
-                        fprintf(stderr, "[ERR] Write failed: %s\n",
-                                strerror(errno));
-                        exit(EXIT_FAILURE);
+                        PANIC("write failed: %s", strerror(errno));
                     }
                 }
             } else if (c != '\n' && c != EOF) {
@@ -121,12 +109,10 @@ int main(int argc, char **argv) {
             if (write(pub_pipe_fd, buffer, PUB_MSG_SIZE) <
                 (ssize_t)PUB_MSG_SIZE) {
                 if (errno == EPIPE) {
-                    printf("[INFO]: mbroker forced the end of the session.\n");
+                    INFO("mbroker forced the end of the session");
                     break;
                 } else {
-                    fprintf(stderr, "[ERR] Write failed: %s\n",
-                            strerror(errno));
-                    exit(EXIT_FAILURE);
+                    PANIC("write failed: %s", strerror(errno));
                 }
             }
 
@@ -149,8 +135,7 @@ int main(int argc, char **argv) {
     }
 
     if (close(pub_pipe_fd) == -1) {
-        fprintf(stderr, "[ERR] Close failed: %s\n", strerror(errno));
-        exit(EXIT_FAILURE);
+        PANIC("close failed: %s", strerror(errno));
     }
 
     // TODO: unlink named pipe
