@@ -56,13 +56,16 @@ int main(int argc, char **argv) {
 
     // Check if the pipe name is valid
     if (strlen(argv[2]) > PIPENAME_SIZE - 1) {
-        PANIC("named_pipe name bigger than supported (%d chars)",
-              PIPENAME_SIZE - 1)
+        fprintf(stderr, "named_pipe name bigger than supported (%d chars)\n",
+                PIPENAME_SIZE - 1);
+        exit(EXIT_FAILURE);
     }
 
     // Check if the box name is valid
     if (argc == 5 && strlen(argv[4]) > BOXNAME_SIZE - 1) {
-        PANIC("box_name bigger than supported (%d chars)", BOXNAME_SIZE - 1)
+        fprintf(stderr, "box_name bigger than supported (%d chars)\n",
+                BOXNAME_SIZE - 1);
+        exit(EXIT_FAILURE);
     }
 
     int register_pipe_fd, man_pipe_fd;
