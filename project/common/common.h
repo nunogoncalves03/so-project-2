@@ -12,17 +12,16 @@
 #define MSG_MAX_SIZE 1024
 #define PIPENAME_SIZE 256
 #define BOXNAME_SIZE 32
-#define OPCODE_SIZE sizeof(uint8_t)
+#define OPCODE_SIZE (ssize_t)sizeof(uint8_t)
 #define REGISTRATION_SIZE OPCODE_SIZE + PIPENAME_SIZE + BOXNAME_SIZE
 #define PUB_MSG_SIZE OPCODE_SIZE + MSG_MAX_SIZE
-#define RETURN_CODE_SIZE sizeof(int32_t)
+#define RETURN_CODE_SIZE (ssize_t)sizeof(int32_t)
 #define ERROR_MSG_SIZE 1024
 #define BOX_RESPONSE OPCODE_SIZE + RETURN_CODE_SIZE + ERROR_MSG_SIZE
 #define MAX_N_BOXES 23
 #define BOX_SIZE 1024
-#define LAST_SIZE sizeof(uint8_t)
+#define LAST_SIZE (ssize_t)sizeof(uint8_t)
 #define LIST_REQUEST_SIZE OPCODE_SIZE + PIPENAME_SIZE
-#define INT64_SIZE sizeof(uint64_t)
 
 // OP_CODES
 #define OPCODE_PUB_REG 1

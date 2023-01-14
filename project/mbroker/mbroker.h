@@ -16,7 +16,7 @@ int box_lookup(const char *box_name);
  *   - queue: a pointer to the queue
  *
  */
-void handle_registration(pc_queue_t *queue);
+void *handle_registration(void *queue);
 
 /* Receives messages from a publsiher and stores them into the given box
  *

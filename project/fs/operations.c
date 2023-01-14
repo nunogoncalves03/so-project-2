@@ -440,15 +440,6 @@ int tfs_unlink(char const *target) {
         inode_delete(target_inumber);
         break;
     case T_FILE: // hard link
-        // can't delete an opened file
-        if (is_file_opened(target_inumber) == 0 &&
-            target_inode->hard_links == 1) {
-            rwl_unlock(&inode_locks[target_inumber]);
-            mutex_unlock(free_open_file_entries_lock);
-            rwl_unlock(&inode_locks[ROOT_DIR_INUM]);
-            return -1;
-        }
-
         // remove its entry from the root directory
         if (clear_dir_entry(root_dir_inode, target + 1) == -1) {
             rwl_unlock(&inode_locks[target_inumber]);

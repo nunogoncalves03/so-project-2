@@ -4,6 +4,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,8 +20,18 @@ static void print_usage() {
             "   ./manager <register_pipe> <pipe_name> list\n");
 }
 
+/* Variable to know whether manager should be shutdown */
+static int shutdown_manager = 0;
+
+void sigint_handler() { shutdown_manager = 1; }
+
 // argv[1] = register_pipe, argv[2] = pipe_name, argv[3] = *, argv[4] = box_name
 int main(int argc, char **argv) {
+
+    if (signal(SIGINT, sigint_handler) == SIG_ERR) {
+        PANIC("couldn't set signal handler")
+    }
+
     int valid_args = 1;
 
     if (argc == 2 && !strcmp(argv[1], "--help")) {
@@ -43,26 +54,32 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    // Check if the pipe name is valid
+    if (strlen(argv[2]) > PIPENAME_SIZE - 1) {
+        PANIC("named_pipe name bigger than supported (%d chars)",
+              PIPENAME_SIZE - 1)
+    }
+
+    // Check if the box name is valid
+    if (argc == 5 && strlen(argv[4]) > BOXNAME_SIZE - 1) {
+        PANIC("box_name bigger than supported (%d chars)", BOXNAME_SIZE - 1)
+    }
+
     int register_pipe_fd, man_pipe_fd;
 
     // Open the register pipe for writing
     if ((register_pipe_fd = open(argv[1], O_WRONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
-    }
-
-    // Check if the pipe name is valid
-    if (strlen(argv[2]) > PIPENAME_SIZE - 1) {
-        PANIC("named_pipe name bigger than supported");
+        PANIC("open failed: %s", strerror(errno))
     }
 
     // Remove man_pipe if it exists
     if (unlink(argv[2]) != 0 && errno != ENOENT) {
-        PANIC("unlink(%s) failed: %s", argv[2], strerror(errno));
+        PANIC("unlink(%s) failed: %s", argv[2], strerror(errno))
     }
 
     // Create man_pipe, through which we will read the response from mbroker
     if (mkfifo(argv[2], 0640) != 0) {
-        PANIC("mkfifo failed: %s", strerror(errno));
+        PANIC("mkfifo failed: %s", strerror(errno))
     }
 
     /* Protocol */
@@ -87,23 +104,33 @@ int main(int argc, char **argv) {
         // Send registration to mbroker
         if (write(register_pipe_fd, registration, REGISTRATION_SIZE) <
             REGISTRATION_SIZE) {
-            PANIC("write failed: %s", strerror(errno));
+            PANIC("write failed: %s", strerror(errno))
         }
     } else { // list the boxes, so there's no box_name to send
         // Send registration to mbroker
         if (write(register_pipe_fd, registration, LIST_REQUEST_SIZE) <
             LIST_REQUEST_SIZE) {
-            PANIC("write failed: %s", strerror(errno));
+            PANIC("write failed: %s", strerror(errno))
         }
     }
 
     if (close(register_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+        PANIC("close failed: %s", strerror(errno))
     }
 
     // Open man_pipe for reading messages
     if ((man_pipe_fd = open(argv[2], O_RDONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
+        // If open is interrupted by a signal, check if it's a SIGINT
+        if (shutdown_manager) {
+            // Remove man_pipe
+            if (unlink(argv[2]) != 0 && errno != ENOENT) {
+                PANIC("unlink(%s) failed: %s", argv[2], strerror(errno))
+            }
+            printf("\n"); // Print a newline after ^C
+            return 0;
+        }
+        // otherwise, PANIC
+        PANIC("open failed: %s", strerror(errno))
     }
 
     ssize_t ret;
@@ -120,10 +147,20 @@ int main(int argc, char **argv) {
         // = 1, mas devido a usarmos structs essa solução torna-se
         // desnecessariamente mais complicada, pelo que fizemos desta forma
         fprintf(stdout, "NO BOXES FOUND\n");
+
+        if (close(man_pipe_fd) == -1) {
+            PANIC("close failed: %s", strerror(errno))
+        }
+
+        // Remove man_pipe
+        if (unlink(argv[2]) != 0 && errno != ENOENT) {
+            PANIC("unlink(%s) failed: %s", argv[2], strerror(errno))
+        }
+
         return 0;
     } else if (ret == -1) {
         // ret == -1 indicates error
-        PANIC("read failed: %s", strerror(errno));
+        PANIC("read failed: %s", strerror(errno))
     }
 
     switch (opcode) {
@@ -134,7 +171,7 @@ int main(int argc, char **argv) {
         // Read the return code
         if (read(man_pipe_fd, &return_code, RETURN_CODE_SIZE) <
             RETURN_CODE_SIZE) {
-            PANIC("read failed: %s", strerror(errno));
+            PANIC("read failed: %s", strerror(errno))
         }
 
         if (return_code == -1) { // error
@@ -142,7 +179,7 @@ int main(int argc, char **argv) {
 
             // Read the error message
             if (read(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE) {
-                PANIC("read failed: %s", strerror(errno));
+                PANIC("read failed: %s", strerror(errno))
             }
 
             fprintf(stdout, "ERROR %s\n", error_msg);
@@ -162,23 +199,23 @@ int main(int argc, char **argv) {
             if (i != 0) {
                 // Read the OP_CODE
                 if (read(man_pipe_fd, &opcode, OPCODE_SIZE) < OPCODE_SIZE) {
-                    PANIC("read failed: %s", strerror(errno));
+                    PANIC("read failed: %s", strerror(errno))
                 }
 
                 // Verify code
                 if (opcode != OPCODE_RES_BOX_LIST) {
-                    PANIC("Internal error: Invalid OP_CODE!");
+                    PANIC("Internal error: Invalid OP_CODE!")
                 }
             }
 
             // Read the "last" byte
             if (read(man_pipe_fd, &last, LAST_SIZE) < LAST_SIZE) {
-                PANIC("read failed: %s", strerror(errno));
+                PANIC("read failed: %s", strerror(errno))
             }
 
             // Read a box_t
             if (read(man_pipe_fd, &boxes[i++], sizeof(box_t)) < sizeof(box_t)) {
-                PANIC("read failed: %s", strerror(errno));
+                PANIC("read failed: %s", strerror(errno))
             }
         }
 
@@ -195,16 +232,18 @@ int main(int argc, char **argv) {
         break;
     }
     default:
-        PANIC("Internal error: Invalid OP_CODE!");
+        PANIC("Internal error: Invalid OP_CODE!")
         break;
     }
 
-    // TODO: devemos fechar?
     if (close(man_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+        PANIC("close failed: %s", strerror(errno))
     }
 
-    // TODO: unlink named pipe
+    // Remove man_pipe
+    if (unlink(argv[2]) != 0 && errno != ENOENT) {
+        PANIC("unlink(%s) failed: %s", argv[2], strerror(errno))
+    }
 
     return 0;
 }

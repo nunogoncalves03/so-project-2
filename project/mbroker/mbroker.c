@@ -1,11 +1,14 @@
 #include "mbroker.h"
 #include "common.h"
+#include "locks.h"
 #include "logging.h"
 #include "operations.h"
 #include "producer-consumer.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,16 +16,28 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-/* Boxes */
+/* Boxes and respective locks */
 static box_t boxes[MAX_N_BOXES];
+static pthread_mutex_t boxes_locks[MAX_N_BOXES];
 static int free_boxes[MAX_N_BOXES];
+static pthread_mutex_t free_boxes_lock;
+static pthread_cond_t boxes_cond_vars[MAX_N_BOXES];
+
+/* Variable to know whether mbroker should be shutdown */
+static int shutdown_mbroker = 0;
+
+void sigint_handler() { shutdown_mbroker = 1; }
 
 // argv[1] = register_pipe, argv[2] = max_sessions
 int main(int argc, char **argv) {
-    for (int i = 0; i < MAX_N_BOXES; i++)
-        free_boxes[i] = 1;
 
-    set_log_level(LOG_VERBOSE);
+    if (signal(SIGINT, sigint_handler) == SIG_ERR) {
+        PANIC("couldn't set signal handler")
+    }
+
+    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
+        PANIC("couldn't set signal handler")
+    }
 
     if (argc == 2 && !strcmp(argv[1], "--help")) {
         printf("usage: ./mbroker <pipename> <max_sessions>\n");
@@ -39,50 +54,72 @@ int main(int argc, char **argv) {
 
     // Init the file system
     if (tfs_init(NULL) == -1) {
-        PANIC("tfs_init failed");
+        PANIC("tfs_init failed")
     }
 
-    int register_pipe_fd, aux_reg_pipe_fd;
+    // Initialize free_boxes
+    for (int i = 0; i < MAX_N_BOXES; i++)
+        free_boxes[i] = 1;
+
+    // Initialize locks
+    mutex_init(&free_boxes_lock);
+
+    for (int i = 0; i < MAX_N_BOXES; i++)
+        mutex_init(&boxes_locks[i]);
+
+    for (int i = 0; i < MAX_N_BOXES; i++)
+        cond_init(&boxes_cond_vars[i]);
+
+    // Set log level
+    set_log_level(LOG_VERBOSE);
+
+    // Init the producer-consumer queue
+    pc_queue_t queue;
+
+    if (pcq_create(&queue, max_sessions * 2) == -1) {
+        PANIC("couldn't create pc_queue")
+    }
+
+    // Create the worker threads
+    pthread_t tid[max_sessions];
+    for (int i = 0; i < max_sessions; i++)
+        pthread_create(&tid[i], NULL, handle_registration, &queue);
+
+    int register_pipe_fd, aux_reg_pipe_fd = 0;
 
     // Remove pipe if it exists
     if (unlink(argv[1]) != 0 && errno != ENOENT) {
-        PANIC("unlink(%s) failed: %s", argv[1], strerror(errno));
+        PANIC("unlink(%s) failed: %s", argv[1], strerror(errno))
     }
 
     // Create the register_pipe
     if (mkfifo(argv[1], 0640) != 0) {
-        PANIC("mkfifo failed: %s", strerror(errno));
+        PANIC("mkfifo failed: %s", strerror(errno))
     }
 
     // Open it for reading
-    if ((register_pipe_fd = open(argv[1], O_RDONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
+    if ((register_pipe_fd = open(argv[1], O_RDONLY)) == -1 &&
+        !shutdown_mbroker) {
+        PANIC("open failed: %s", strerror(errno))
     }
 
     // Open it for writing, so after dealing with all registrations pending,
-    // reading from the pipe won't return 0 (which means there's no writers),
+    // reading from the pipe won't return 0 (which means there are no writers),
     // and instead will be waiting (passively) for someone to write something to
     // the pipe, since there's always at least one writer, the mbroker itself
-    if ((aux_reg_pipe_fd = open(argv[1], O_WRONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
-    }
-
-    // Init the producer-consumer queue
-    pc_queue_t *queue = (pc_queue_t *)malloc(sizeof(pc_queue_t));
-    if (queue == NULL) {
-        PANIC("couldn't malloc queue")
-    }
-
-    if (pcq_create(queue, max_sessions / 2) == -1) { // TODO: * 2
-        PANIC("couldn't create pc_queue")
+    if (!shutdown_mbroker &&
+        (aux_reg_pipe_fd = open(argv[1], O_WRONLY)) == -1) {
+        PANIC("open failed: %s", strerror(errno))
     }
 
     char opcode;
-
-    // Loop while dealing with clients
-    while (1) {
+    // Loop forever reading registrations
+    while (!shutdown_mbroker) {
         // Read the OP_CODE
         ssize_t ret = read(register_pipe_fd, &opcode, OPCODE_SIZE);
+
+        if (shutdown_mbroker)
+            break;
 
         if (ret == 0) {
             // ret == 0 indicates EOF
@@ -101,7 +138,7 @@ int main(int argc, char **argv) {
         {
             void *registration = calloc(REGISTRATION_SIZE, sizeof(char));
             if (registration == NULL) {
-                PANIC("couldn't malloc registration");
+                PANIC("couldn't malloc registration")
             }
 
             // copy OP_CODE
@@ -111,70 +148,88 @@ int main(int argc, char **argv) {
             if (read(register_pipe_fd, registration + OPCODE_SIZE,
                      REGISTRATION_SIZE - OPCODE_SIZE) <
                 REGISTRATION_SIZE - OPCODE_SIZE) {
-                PANIC("read failed: %s", strerror(errno));
+                PANIC("read failed: %s", strerror(errno))
             }
 
-            pcq_enqueue(queue, registration);
-
-            handle_registration(queue);
+            LOG("received a registration from: %s code: %d",
+                ((char *)(registration + OPCODE_SIZE)), opcode)
+            pcq_enqueue(&queue, registration);
 
             break;
         }
         case OPCODE_BOX_LIST: { // Box listing
             void *registration = calloc(LIST_REQUEST_SIZE, sizeof(char));
             if (registration == NULL) {
-                PANIC("couldn't malloc registration");
+                PANIC("couldn't malloc registration")
             }
 
-            // copy OP_CODE
+            // Copy OP_CODE
             memcpy(registration, &opcode, OPCODE_SIZE);
 
             // Read the rest of the registration
             if (read(register_pipe_fd, registration + OPCODE_SIZE,
                      LIST_REQUEST_SIZE - OPCODE_SIZE) <
                 LIST_REQUEST_SIZE - OPCODE_SIZE) {
-                PANIC("read failed: %s", strerror(errno));
+                PANIC("read failed: %s", strerror(errno))
             }
 
-            pcq_enqueue(queue, registration);
-
-            handle_registration(queue);
+            LOG("received a registration from: %s code: %d",
+                ((char *)(registration + OPCODE_SIZE)), opcode)
+            pcq_enqueue(&queue, registration);
 
             break;
         }
         default:
-            PANIC("Internal error: Invalid OP_CODE!");
+            PANIC("Internal error: Invalid OP_CODE!")
             break;
         }
     }
 
-    free(queue);
+    /* In this section we should destroy TFS, pcq, locks, cond vars and exit
+    threads, but due to problems with destroying locks, which are caused
+    by threads that are holding the lock at the time of its destruction, we
+    chose not to do it, since it's not a requirement. */
 
-    if (close(register_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+    // Close register pipe
+    if (register_pipe_fd != -1 && close(register_pipe_fd) == -1) {
+        PANIC("close failed: %s", strerror(errno))
     }
 
-    if (close(aux_reg_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+    // Close auxiliar register pipe
+    if (aux_reg_pipe_fd != -1 && close(aux_reg_pipe_fd) == -1) {
+        PANIC("close failed: %s", strerror(errno))
     }
+
+    // Remove register pipe
+    if (unlink(argv[1]) != 0 && errno != ENOENT) {
+        PANIC("unlink(%s) failed: %s", argv[1], strerror(errno))
+    }
+    printf("\n"); // Print a newline after ^C
 
     return 0;
 }
 
 int box_lookup(const char *box_name) {
     for (int i = 0; i < MAX_N_BOXES; i++) {
-        if (free_boxes[i] == 0 && !strcmp(boxes[i].box_name, box_name))
+        mutex_lock(&boxes_locks[i]);
+        if (free_boxes[i] == 0 && !strcmp(boxes[i].box_name, box_name)) {
+            mutex_unlock(&boxes_locks[i]);
             return i;
+        }
+        mutex_unlock(&boxes_locks[i]);
     }
     return -1;
 }
 
-void handle_registration(pc_queue_t *queue) {
+void *handle_registration(void *q) {
+    pc_queue_t *queue = (pc_queue_t *)q;
     while (1) {
         char *registration = (char *)pcq_dequeue(queue);
-        LOG("Received a registration");
 
         char opcode = registration[0];
+        LOG("starting client session: %s",
+            ((char *)(registration + OPCODE_SIZE)))
+
         switch (opcode) {
         case OPCODE_PUB_REG: // publisher registration
         case OPCODE_SUB_REG: // subscriber registration
@@ -220,12 +275,11 @@ void handle_registration(pc_queue_t *queue) {
             break;
         }
         default:
-            PANIC("Internal error: Invalid OP_CODE!");
+            PANIC("Internal error: Invalid OP_CODE!")
             break;
         }
-
-        break; // TODO: remove in the future
     }
+    return NULL;
 }
 
 void pub_connect(char *pub_pipe_path, char *box_name) {
@@ -233,53 +287,72 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
 
     // Open the pub_pipe for reading
     if ((pub_pipe_fd = open(pub_pipe_path, O_RDONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
+        if (errno == ENOENT) {
+            WARN("publisher pipe %s no longer exists", pub_pipe_path)
+            return;
+        }
+        PANIC("open failed: %s", strerror(errno))
     }
 
+    mutex_lock(&free_boxes_lock);
     int i_box = box_lookup(box_name);
 
     // Check if box exists
     if (i_box == -1) {
-        INFO("box %s doesn't exist", box_name);
+        INFO("box %s doesn't exist", box_name)
+        mutex_unlock(&free_boxes_lock);
 
         // Close the pub pipe
         if (close(pub_pipe_fd) == -1) {
-            PANIC("close failed: %s", strerror(errno));
+            PANIC("close failed: %s", strerror(errno))
         }
         return;
     }
+    mutex_lock(&boxes_locks[i_box]);
+    mutex_unlock(&free_boxes_lock);
 
     box_t *box = &boxes[i_box];
 
     // Check if box is full
     if (box->box_size == BOX_SIZE) {
-        // TODO: alertar subs que ja n vai ser escrito mais nada
-        INFO("box %s is full", box_name);
+        INFO("box %s is full", box_name)
+        mutex_unlock(&boxes_locks[i_box]);
 
         // Close the pub pipe
         if (close(pub_pipe_fd) == -1) {
-            PANIC("close failed: %s", strerror(errno));
+            PANIC("close failed: %s", strerror(errno))
         }
         return;
     }
 
-    // TODO: atencao mutex
     // Check if there's no pub already in the given box
     if (box->n_publishers == 1) {
-        INFO("there's already a pub in box %s", box_name);
+        INFO("there's already a pub in box %s", box_name)
+        mutex_unlock(&boxes_locks[i_box]);
 
         // Close the pub pipe
         if (close(pub_pipe_fd) == -1) {
-            PANIC("close failed: %s", strerror(errno));
+            PANIC("close failed: %s", strerror(errno))
         }
         return;
     }
 
     box->n_publishers = 1;
+    mutex_unlock(&boxes_locks[i_box]);
 
     // Open the box to write the messages
     if ((box_fd = tfs_open(box_name, TFS_O_APPEND)) == -1) {
-        PANIC("tfs_open failed");
+        WARN("tfs_open failed")
+
+        mutex_lock(&boxes_locks[i_box]);
+        box->n_publishers = 0;
+        mutex_unlock(&boxes_locks[i_box]);
+
+        if (close(pub_pipe_fd) == -1) {
+            PANIC("close failed: %s", strerror(errno))
+        }
+
+        return;
     }
 
     ssize_t ret;
@@ -295,43 +368,56 @@ void pub_connect(char *pub_pipe_path, char *box_name) {
             break;
         } else if (ret == -1) {
             // ret == -1 indicates error
-            PANIC("read failed: %s", strerror(errno));
+            PANIC("read failed: %s", strerror(errno))
         }
 
         // Verify code
         if (buffer[0] != OPCODE_PUB_MSG) {
-            PANIC("Internal error: Invalid OP_CODE!");
+            PANIC("Internal error: Invalid OP_CODE!")
         }
 
         // Copy only the msg itself
         strcpy(msg, buffer + OPCODE_SIZE);
 
+        mutex_lock(&free_boxes_lock);
         // Check if box has been deleted by a manager in the meantime
-        if (free_boxes[i_box] == 1)
+        if (free_boxes[i_box] == 1) {
+            mutex_unlock(&free_boxes_lock);
             break;
+        }
 
+        mutex_lock(&boxes_locks[i_box]);
+        mutex_unlock(&free_boxes_lock);
         if ((ret = tfs_write(box_fd, msg, strlen(msg) + 1)) < strlen(msg) + 1) {
             if (ret == -1) { // error
-                PANIC("tfs_write failed");
+                mutex_unlock(&boxes_locks[i_box]);
+                PANIC("tfs_write failed")
             } else { // Couldn't write whole message
-                // TODO: alertar subs que ja n vai ser escrito mais nada
-                INFO("box %s is full", box_name);
+                INFO("box %s is full", box_name)
+                // Signal subs that a new message was written
+                cond_broadcast(&boxes_cond_vars[i_box]);
                 box->box_size += (uint64_t)ret;
+                mutex_unlock(&boxes_locks[i_box]);
                 break;
             }
         }
 
+        // Signal subs that a new message was written
+        cond_broadcast(&boxes_cond_vars[i_box]);
         box->box_size += (uint64_t)ret;
+        mutex_unlock(&boxes_locks[i_box]);
     }
 
     if (tfs_close(box_fd) == -1) {
-        PANIC("tfs_close failed");
+        PANIC("tfs_close failed")
     }
 
+    mutex_lock(&boxes_locks[i_box]);
     box->n_publishers = 0;
+    mutex_unlock(&boxes_locks[i_box]);
 
     if (close(pub_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+        PANIC("close failed: %s", strerror(errno))
     }
 }
 
@@ -340,79 +426,116 @@ void sub_connect(char *sub_pipe_path, char *box_name) {
 
     // Open the sub_pipe for writing messages
     if ((sub_pipe_fd = open(sub_pipe_path, O_WRONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
+        if (errno == ENOENT) {
+            WARN("subscriber pipe %s no longer exists", sub_pipe_path)
+            return;
+        }
+        PANIC("open failed: %s", strerror(errno))
     }
 
+    mutex_lock(&free_boxes_lock);
     int i_box = box_lookup(box_name);
 
     // Check if box exists
     if (i_box == -1) {
-        INFO("box %s doesn't exist", box_name);
+        INFO("box %s doesn't exist", box_name)
+        mutex_unlock(&free_boxes_lock);
 
         // Close the sub_pipe
         if (close(sub_pipe_fd) == -1) {
-            PANIC("close failed: %s", strerror(errno));
+            PANIC("close failed: %s", strerror(errno))
+        }
+
+        return;
+    }
+    mutex_lock(&boxes_locks[i_box]);
+    mutex_unlock(&free_boxes_lock);
+
+    box_t *box = &boxes[i_box];
+
+    box->n_subscribers++;
+    mutex_unlock(&boxes_locks[i_box]);
+
+    // Open the box to read the messages
+    if ((box_fd = tfs_open(box_name, 0)) == -1) {
+        WARN("tfs_open failed")
+
+        mutex_lock(&boxes_locks[i_box]);
+        box->n_subscribers--;
+        mutex_unlock(&boxes_locks[i_box]);
+
+        if (close(sub_pipe_fd) == -1) {
+            PANIC("close failed: %s", strerror(errno))
         }
 
         return;
     }
 
-    box_t *box = &boxes[i_box];
-
-    // TODO: atencao mutex
-    box->n_subscribers++;
-
-    // Open the box to read the messages
-    if ((box_fd = tfs_open(box_name, 0)) == -1) {
-        PANIC("tfs_open failed");
-    }
-
     ssize_t ret;
-    char buffer[MSG_MAX_SIZE];
+    char buffer[MSG_MAX_SIZE + 1];
     char response[PUB_MSG_SIZE];
     response[0] = OPCODE_SUB_MSG;
+    int end_session = 0;
 
-    // Check if box has been deleted by a manager in the meantime
-    // if (free_boxes[i_box] == 1) {
-    // break;  // TODO: quando o sub tiver bem feito, e mandar a msg
-    // recebida e dps terminar, ou terminar aqui antes de ler?
-    // }
-
-    // Read the messages from the box
-    if ((ret = tfs_read(box_fd, buffer, BOX_SIZE)) == -1) {
-        PANIC("tfs_read failed");
-    }
-
-    size_t len = strlen(buffer);
-    char *ptr_buffer = buffer;
-    size_t _ret = (size_t)ret;
-    // Separate messages
-    while (_ret > 0) {
-        strncpy(response + OPCODE_SIZE, ptr_buffer,
-                (len == _ret ? len : len + 1));
-
-        _ret -= (len == _ret ? len : len + 1);
-        // Send each message to sub
-        if (write(sub_pipe_fd, response, PUB_MSG_SIZE) < PUB_MSG_SIZE) {
-            // TODO: ignore SIGPIPE and end session
-            PANIC("write failed: %s", strerror(errno))
+    mutex_lock(&free_boxes_lock);
+    do {
+        // Check if box has been deleted by a manager in the meantime
+        if (free_boxes[i_box] == 1) {
+            mutex_unlock(&free_boxes_lock);
+            break;
         }
-        ptr_buffer += len + 1;
-        if (_ret > 0) {
-            len = strnlen(ptr_buffer, _ret);
-            if (len == _ret)
-                response[OPCODE_SIZE + len] = '\0';
+
+        mutex_lock(&boxes_locks[i_box]);
+        mutex_unlock(&free_boxes_lock);
+        // Read the messages from the box
+        if ((ret = tfs_read(box_fd, buffer, BOX_SIZE)) == -1) {
+            mutex_unlock(&boxes_locks[i_box]);
+            PANIC("tfs_read failed")
         }
-    }
+        mutex_unlock(&boxes_locks[i_box]);
+
+        buffer[ret] = '\0';
+        size_t len;
+        char *ptr_buffer = buffer;
+        size_t _ret = (size_t)ret;
+        // Separate messages
+        while (_ret > 0) {
+            len = strlen(ptr_buffer);
+            strcpy(response + OPCODE_SIZE, ptr_buffer);
+            // if there was no '\0' at the end of the last message
+            if (_ret == len && ret != 0)
+                _ret++;
+            _ret -= len + 1;
+            // Send each message to sub
+            if (write(sub_pipe_fd, response, PUB_MSG_SIZE) < PUB_MSG_SIZE) {
+                if (errno == EPIPE) {
+                    end_session = 1;
+                    break;
+                } else {
+                    PANIC("write failed: %s", strerror(errno))
+                }
+            }
+            ptr_buffer += len + 1;
+        }
+
+        if (end_session)
+            break;
+
+        // Wait for a signal from a pub
+        mutex_lock(&free_boxes_lock);
+        cond_wait(&boxes_cond_vars[i_box], &free_boxes_lock);
+    } while (1);
 
     if (tfs_close(box_fd) == -1) {
-        PANIC("tfs_close failed");
+        PANIC("tfs_close failed")
     }
 
+    mutex_lock(&boxes_locks[i_box]);
     box->n_subscribers--;
+    mutex_unlock(&boxes_locks[i_box]);
 
     if (close(sub_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+        PANIC("close failed: %s", strerror(errno))
     }
 }
 
@@ -421,7 +544,11 @@ void box_creation(char *man_pipe_path, char *box_name) {
 
     // Open the man_pipe for writing messages
     if ((man_pipe_fd = open(man_pipe_path, O_WRONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
+        if (errno == ENOENT) {
+            WARN("manager pipe %s no longer exists", man_pipe_path)
+            return;
+        }
+        PANIC("open failed: %s", strerror(errno))
     }
 
     /* Protocol */
@@ -435,13 +562,16 @@ void box_creation(char *man_pipe_path, char *box_name) {
     // error message
     char error_msg[ERROR_MSG_SIZE] = {0};
 
+    mutex_lock(&free_boxes_lock);
     // Check if box already exists
     if (box_lookup(box_name) != -1) {
+        mutex_unlock(&free_boxes_lock);
         return_code = -1;
         strcpy(error_msg, "Box already exists.");
     } else {
         // Create the box
         if ((box_fd = tfs_open(box_name, TFS_O_CREAT)) == -1) {
+            mutex_unlock(&free_boxes_lock);
             return_code = -1;
             strcpy(error_msg, "Couldn't create box.");
         } else {
@@ -455,16 +585,19 @@ void box_creation(char *man_pipe_path, char *box_name) {
                     new_box.n_publishers = 0;
                     new_box.n_subscribers = 0;
 
+                    mutex_lock(&boxes_locks[i]);
                     boxes[i] = new_box;
+                    mutex_unlock(&boxes_locks[i]);
                     break;
                 }
             }
+            mutex_unlock(&free_boxes_lock);
         }
 
         if (box_fd != -1) {
             if (tfs_close(box_fd) == -1) {
                 // Shouldn't happen
-                PANIC("Internal error: Box close failed!");
+                PANIC("Internal error: Box close failed!")
             }
         }
     }
@@ -472,24 +605,27 @@ void box_creation(char *man_pipe_path, char *box_name) {
     // Send the response
 
     // OP_CODE
-    if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
-        PANIC("write failed: %s", strerror(errno));
+    if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE &&
+        errno != EPIPE) {
+        PANIC("write failed: %s", strerror(errno))
     }
 
     // return_code
-    if (write(man_pipe_fd, &return_code, RETURN_CODE_SIZE) < RETURN_CODE_SIZE) {
-        PANIC("write failed: %s", strerror(errno));
+    if (write(man_pipe_fd, &return_code, RETURN_CODE_SIZE) < RETURN_CODE_SIZE &&
+        errno != EPIPE) {
+        PANIC("write failed: %s", strerror(errno))
     }
 
     // error message
     if (return_code == -1) {
-        if (write(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE) {
-            PANIC("write failed: %s", strerror(errno));
+        if (write(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE &&
+            errno != EPIPE) {
+            PANIC("write failed: %s", strerror(errno))
         }
     }
 
     if (close(man_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+        PANIC("close failed: %s", strerror(errno))
     }
 }
 
@@ -498,7 +634,11 @@ void box_removal(char *man_pipe_path, char *box_name) {
 
     // Open the man_pipe for writing messages
     if ((man_pipe_fd = open(man_pipe_path, O_WRONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
+        if (errno == ENOENT) {
+            WARN("manager pipe %s no longer exists", man_pipe_path)
+            return;
+        }
+        PANIC("open failed: %s", strerror(errno))
     }
 
     /* Protocol */
@@ -513,41 +653,52 @@ void box_removal(char *man_pipe_path, char *box_name) {
     char error_msg[ERROR_MSG_SIZE] = {0};
 
     int i_box;
+    mutex_lock(&free_boxes_lock);
     // Check if box doesn't exist
     if ((i_box = box_lookup(box_name)) == -1) {
+        mutex_unlock(&free_boxes_lock);
         return_code = -1;
         strcpy(error_msg, "Box doesn't exist.");
     } else {
         // Remove the box
+        mutex_lock(&boxes_locks[i_box]);
         if (tfs_unlink(box_name) == -1) {
             return_code = -1;
             strcpy(error_msg, "Couldn't remove box.");
+        } else {
+            free_boxes[i_box] = 1;
+            // Alert sub threads that the box has been removed
+            cond_broadcast(&boxes_cond_vars[i_box]);
         }
 
-        free_boxes[i_box] = 1;
+        mutex_unlock(&boxes_locks[i_box]);
+        mutex_unlock(&free_boxes_lock);
     }
 
     // Send the response
 
     // OP_CODE
-    if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
-        PANIC("write failed: %s", strerror(errno));
+    if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE &&
+        errno != EPIPE) {
+        PANIC("write failed: %s", strerror(errno))
     }
 
     // return_code
-    if (write(man_pipe_fd, &return_code, RETURN_CODE_SIZE) < RETURN_CODE_SIZE) {
-        PANIC("write failed: %s", strerror(errno));
+    if (write(man_pipe_fd, &return_code, RETURN_CODE_SIZE) < RETURN_CODE_SIZE &&
+        errno != EPIPE) {
+        PANIC("write failed: %s", strerror(errno))
     }
 
     // error message
     if (return_code == -1) {
-        if (write(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE) {
-            PANIC("write failed: %s", strerror(errno));
+        if (write(man_pipe_fd, error_msg, ERROR_MSG_SIZE) < ERROR_MSG_SIZE &&
+            errno != EPIPE) {
+            PANIC("write failed: %s", strerror(errno))
         }
     }
 
     if (close(man_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+        PANIC("close failed: %s", strerror(errno))
     }
 }
 
@@ -556,7 +707,11 @@ void box_listing(char *man_pipe_path) {
 
     // Open the man_pipe for writing messages
     if ((man_pipe_fd = open(man_pipe_path, O_WRONLY)) == -1) {
-        PANIC("open failed: %s", strerror(errno));
+        if (errno == ENOENT) {
+            WARN("manager pipe %s no longer exists", man_pipe_path)
+            return;
+        }
+        PANIC("open failed: %s", strerror(errno))
     }
 
     /* Protocol */
@@ -567,30 +722,44 @@ void box_listing(char *man_pipe_path) {
     // "last" byte
     uint8_t last = 0;
     box_t *last_box = NULL;
+    int i_last_box;
 
+    mutex_lock(&free_boxes_lock);
     for (int i = 0; i < MAX_N_BOXES; i++) {
         if (last_box == NULL) {
-            if (free_boxes[i] == 0)
+            if (free_boxes[i] == 0) {
                 last_box = &boxes[i];
+                i_last_box = i;
+            }
         } else {
             if (free_boxes[i] == 0) {
                 // Send the OP_CODE
-                if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
-                    PANIC("write failed: %s", strerror(errno));
+                if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE &&
+                    errno != EPIPE) {
+                    mutex_unlock(&free_boxes_lock);
+                    PANIC("write failed: %s", strerror(errno))
                 }
 
                 // Send the "last" byte
-                if (write(man_pipe_fd, &last, LAST_SIZE) < LAST_SIZE) {
-                    PANIC("write failed: %s", strerror(errno));
+                if (write(man_pipe_fd, &last, LAST_SIZE) < LAST_SIZE &&
+                    errno != EPIPE) {
+                    mutex_unlock(&free_boxes_lock);
+                    PANIC("write failed: %s", strerror(errno))
                 }
 
+                mutex_lock(&boxes_locks[i_last_box]);
                 // Send the box
                 if (write(man_pipe_fd, last_box, sizeof(box_t)) <
-                    sizeof(box_t)) {
-                    PANIC("write failed: %s", strerror(errno));
+                        sizeof(box_t) &&
+                    errno != EPIPE) {
+                    mutex_unlock(&free_boxes_lock);
+                    mutex_unlock(&boxes_locks[i_last_box]);
+                    PANIC("write failed: %s", strerror(errno))
                 }
+                mutex_unlock(&boxes_locks[i_last_box]);
 
                 last_box = &boxes[i];
+                i_last_box = i;
             }
         }
     }
@@ -600,20 +769,31 @@ void box_listing(char *man_pipe_path) {
         last = 1;
 
         // Send the OP_CODE
-        if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE) {
-            PANIC("write failed: %s", strerror(errno));
+        if (write(man_pipe_fd, &op_code, OPCODE_SIZE) < OPCODE_SIZE &&
+            errno != EPIPE) {
+            mutex_unlock(&free_boxes_lock);
+            PANIC("write failed: %s", strerror(errno))
         }
         // Send the "last" byte
-        if (write(man_pipe_fd, &last, LAST_SIZE) < LAST_SIZE) {
-            PANIC("write failed: %s", strerror(errno));
+        if (write(man_pipe_fd, &last, LAST_SIZE) < LAST_SIZE &&
+            errno != EPIPE) {
+            mutex_unlock(&free_boxes_lock);
+            PANIC("write failed: %s", strerror(errno))
         }
+
+        mutex_lock(&boxes_locks[i_last_box]);
         // Send the box
-        if (write(man_pipe_fd, last_box, sizeof(box_t)) < sizeof(box_t)) {
-            PANIC("write failed: %s", strerror(errno));
+        if (write(man_pipe_fd, last_box, sizeof(box_t)) < sizeof(box_t) &&
+            errno != EPIPE) {
+            mutex_unlock(&free_boxes_lock);
+            mutex_unlock(&boxes_locks[i_last_box]);
+            PANIC("write failed: %s", strerror(errno))
         }
+        mutex_unlock(&boxes_locks[i_last_box]);
     }
+    mutex_unlock(&free_boxes_lock);
 
     if (close(man_pipe_fd) == -1) {
-        PANIC("close failed: %s", strerror(errno));
+        PANIC("close failed: %s", strerror(errno))
     }
 }
