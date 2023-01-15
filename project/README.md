@@ -19,6 +19,8 @@ Aliás, é possível que uma caixa venha a ter vários _publishers_ ao longo da 
 As operações de criação e remoção de caixa são geridas pelo _manager_.
 Adicionalmente, o _manager_ permite listar as caixas existentes na _mbroker_.
 
+### __Nota: o nome da caixa deve ser o path absoluto (i.e. "/box")__
+
 ### 1.1. Servidor
 
 O servidor incorpora o TecnicoFS e é um processo autónomo, inicializado da seguinte forma:
