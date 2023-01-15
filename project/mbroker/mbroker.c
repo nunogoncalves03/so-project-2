@@ -185,10 +185,11 @@ int main(int argc, char **argv) {
         }
     }
 
-    /* In this section we should destroy TFS, pcq, locks, cond vars and exit
-    threads, but due to problems with destroying locks, which are caused
-    by threads that are holding the lock at the time of its destruction, we
-    chose not to do it, since it's not a requirement. */
+    /* In this section we should destroy TFS, pcq (and free queued
+    registrations), locks, cond vars and exit threads, but due to problems with
+    destroying locks, which are caused by threads that are holding the lock at
+    the time of its destruction, we chose not to do it, since it's not a
+    requirement. */
 
     // Close register pipe
     if (register_pipe_fd != -1 && close(register_pipe_fd) == -1) {
